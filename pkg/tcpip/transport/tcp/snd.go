@@ -38,7 +38,9 @@ const (
 	MinSRTT = 1 * time.Millisecond
 
 	// InitialCwnd is the initial congestion window.
-	InitialCwnd = 10
+	// Bumped from the default 10 to reduce slow-start ramp time over
+	// high-latency tunnel paths (CONNECT-IP over QUIC).
+	InitialCwnd = 64
 
 	// nDupAckThreshold is the number of duplicate ACK's required
 	// before fast-retransmit is entered.
