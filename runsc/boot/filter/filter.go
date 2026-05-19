@@ -17,8 +17,6 @@
 package filter
 
 import (
-	"fmt"
-
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/runsc/boot/filter/config"
@@ -30,6 +28,20 @@ import (
 // violation.
 const debugFilter = false
 
+// apoxyDefaultAction overrides upstream's default seccomp action (which
+// is RET_KILL_PROCESS via saneDefaultAction). ENOSYS matches the kernel's
+// own behavior for unknown syscalls, so well-written probing code (Go
+// runtime fallback paths, version-detect probes) handles it gracefully.
+// Empirically the upstream KILL_PROCESS default killed the Sentry on a
+// rare (~10–20%) intermittent unknown-syscall path during sandbox
+// bring-up; ENOSYS lets the same call return cleanly and the Sentry
+// proceeds. The allow-list (the actual security boundary) is unchanged.
+//
+// Note: precompiled BPF programs are generated upstream with the
+// KILL_PROCESS default baked in, so this override implies bypassing the
+// precompiled fast path; Install() does so unconditionally below.
+const apoxyDefaultAction = seccomp.Action("return_error:26") // 38 = ENOSYS
+
 // Options is a re-export of the config Options type under this package.
 type Options = config.Options
 
@@ -38,30 +50,17 @@ func Install(opt Options) error {
 	for _, warning := range config.Warnings(opt) {
 		log.Warningf("*** SECCOMP WARNING: %s", warning)
 	}
+	// Always build from scratch (skip precompiled): the precompiled
+	// programs are generated with upstream's KILL_PROCESS default, which
+	// conflicts with apoxyDefaultAction.
 	key := opt.ConfigKey()
-	precompiled, usePrecompiled := GetPrecompiled(key)
-	if usePrecompiled && !debugFilter {
-		vars := opt.Vars()
-		log.Debugf("Loaded precompiled seccomp instructions for options %v, using variables: %v", key, vars)
-		insns, err := precompiled.RenderInstructions(vars)
-		if err != nil {
-			return fmt.Errorf("cannot render precompiled program for options %v / vars %v: %w", key, vars, err)
-		}
-		return seccomp.SetFilter(insns)
-	}
 	seccompOpts := config.SeccompOptions(opt)
+	seccompOpts.DefaultAction = apoxyDefaultAction
 	if debugFilter {
 		log.Infof("Seccomp filter debugging is enabled; seccomp failures will result in a panic stack trace.")
 		seccompOpts.DefaultAction = seccomp.Trap
 	} else {
-		log.Infof("No precompiled program found for config options %v, building seccomp program from scratch. This may slow down container startup.", key)
-		if log.IsLogging(log.Debug) {
-			precompiledKeys := ListPrecompiled()
-			log.Debugf("Precompiled seccomp-bpf program configuration option variants (%d):", len(precompiledKeys))
-			for k := range precompiledKeys {
-				log.Debugf("  %v", k)
-			}
-		}
+		log.Infof("Building seccomp program from scratch (apoxy fork: ENOSYS default) for config options %v.", key)
 	}
 	rules, denyRules := config.Rules(opt)
 	program := &seccomp.Program{

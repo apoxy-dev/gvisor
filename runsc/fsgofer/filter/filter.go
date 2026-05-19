@@ -65,6 +65,12 @@ func Install(opt Options) error {
 		s.Merge(lisafsFilters)
 	}
 
+	// Match the apoxy fork's boot-side default: ENOSYS for unknown
+	// syscalls instead of upstream's KILL_PROCESS. See the comment on
+	// apoxyDefaultAction in runsc/boot/filter/filter.go for rationale.
+	seccompOpts := seccomp.ProgramOptions{
+		DefaultAction: seccomp.Action("return_error:26"), // 38 = ENOSYS
+	}
 	program := &seccomp.Program{
 		RuleSets: []seccomp.RuleSet{
 			{
@@ -75,6 +81,7 @@ func Install(opt Options) error {
 				Action: seccomp.Allow,
 			},
 		},
+		Options: seccompOpts,
 	}
 
 	return program.Install()
