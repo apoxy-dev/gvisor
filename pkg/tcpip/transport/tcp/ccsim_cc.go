@@ -366,6 +366,10 @@ func (w *ccsimWrapper) Update(packetsAcked int, rtt time.Duration) {
 
 func (w *ccsimWrapper) PostRecovery() { w.sim.PostRecovery() }
 
+// HandleRTOUndone does nothing: the sim congestion control restores its cwnd
+// in UndoRecovery.
+func (w *ccsimWrapper) HandleRTOUndone() {}
+
 // ccsimInitCC returns the sim congestion control for name, or nil for a stock one.
 // It drops the old ccsim state. Only a sim congestion control gets a new one.
 //

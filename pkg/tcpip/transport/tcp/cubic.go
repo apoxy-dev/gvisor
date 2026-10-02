@@ -298,6 +298,17 @@ func (c *cubicState) HandleRTOExpired(reduce bool) {
 	c.s.SndCwnd = 1
 }
 
+// HandleRTOUndone implements congestionControl.HandleRTOUndone. A new epoch
+// starts at the restored cwnd, as after Linux bictcp_reset.
+//
+// +checklocks:c.s.ep.mu
+func (c *cubicState) HandleRTOUndone() {
+	c.numCongestionEvents = 0
+	if c.s.SndCwnd >= c.s.Ssthresh {
+		c.enterCongestionAvoidance()
+	}
+}
+
 // fastConvergence implements the logic for Fast Convergence algorithm as
 // described in https://tools.ietf.org/html/rfc8312#section-4.6.
 func (c *cubicState) fastConvergence() {

@@ -74,6 +74,10 @@ type congestionControl interface {
 	// is false if ssthresh was already lowered for this window.
 	HandleRTOExpired(reduce bool)
 
+	// HandleRTOUndone is invoked after the undo of a spurious RTO restored
+	// cwnd and ssthresh.
+	HandleRTOUndone()
+
 	// Update is invoked when processing inbound acks. It's passed the
 	// number of packet's that were acked by the most recent cumulative
 	// acknowledgement.  rtt is the round-trip time, or is set to unknownRTT
@@ -185,6 +189,12 @@ type sender struct {
 	// rtoRetries is the number of RTOs since SndUna last moved, as Linux
 	// icsk_retransmits. Not saved: checkpoint and restore are not used.
 	rtoRetries int `state:"nosave"`
+
+	// priorCwnd and priorSsthresh are cwnd and ssthresh before the last
+	// decrease, for the undo of a spurious RTO. Not saved: checkpoint and
+	// restore are not used.
+	priorCwnd     int `state:"nosave"`
+	priorSsthresh int `state:"nosave"`
 
 	// startCork start corking the segments.
 	startCork bool
@@ -608,6 +618,9 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 	reduce := s.state == tcpip.Open || s.state == tcpip.Disorder ||
 		s.FastRecovery.Last.LessThan(s.SndUna) ||
 		(s.state == tcpip.RTORecovery && s.rtoRetries == 0)
+	if reduce {
+		s.savePrior()
+	}
 
 	// See: https://tools.ietf.org/html/rfc6582#section-3.2 Step 4.
 	//
@@ -1148,6 +1161,27 @@ func (s *sender) sendData() {
 	s.postXmit(dataSent, true /* shouldScheduleProbe */)
 }
 
+// savePrior saves cwnd and ssthresh before a decrease, as Linux prior_cwnd
+// and prior_ssthresh (tcp_current_ssthresh).
+//
+// +checklocks:s.ep.mu
+func (s *sender) savePrior() {
+	s.priorCwnd = s.SndCwnd
+	s.priorSsthresh = s.Ssthresh
+	if s.state != tcpip.FastRecovery && s.state != tcpip.SACKRecovery {
+		s.priorSsthresh = max(s.Ssthresh, s.SndCwnd/2+s.SndCwnd/4)
+	}
+}
+
+// handleLossDetected saves cwnd and ssthresh, and tells the congestion control
+// about the loss.
+//
+// +checklocks:s.ep.mu
+func (s *sender) handleLossDetected() {
+	s.savePrior()
+	s.cc.HandleLossDetected()
+}
+
 // +checklocks:s.ep.mu
 func (s *sender) enterRecovery() {
 	s.FastRecovery.Active = true
@@ -1323,7 +1357,7 @@ func (s *sender) detectLoss(seg *segment) (fastRetransmit bool) {
 		s.DupAckCount = 0
 		return false
 	}
-	s.cc.HandleLossDetected()
+	s.handleLossDetected()
 	s.enterRecovery()
 	return true
 }
@@ -1570,7 +1604,8 @@ func (s *sender) exitRecoveryState() {
 }
 
 // undoRTO stops the go-back-N resend after a spurious RTO. As in Linux
-// tcp_undo_cwnd_reduction with unmark_loss, the sent data is in flight again.
+// tcp_undo_cwnd_reduction with unmark_loss, the sent data is in flight again,
+// and cwnd and ssthresh go back to their values before the decrease.
 //
 // +checklocks:s.ep.mu
 func (s *sender) undoRTO() {
@@ -1586,6 +1621,12 @@ func (s *sender) undoRTO() {
 	s.updateWriteNext(seg)
 	s.ccsimUndoRTO()
 	s.firstRetransmittedSegXmitTime = tcpip.MonotonicTime{}
+	// A sim congestion control restores cwnd in UndoRecovery.
+	if s.ccsim == nil && s.priorSsthresh != 0 {
+		s.SndCwnd = max(s.SndCwnd, s.priorCwnd)
+		s.Ssthresh = max(s.Ssthresh, s.priorSsthresh)
+	}
+	s.cc.HandleRTOUndone()
 }
 
 // Check if the sender is in RTORecovery, FastRecovery or SACKRecovery state.
@@ -1837,7 +1878,7 @@ func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 			// If any segment is marked as lost by
 			// RACK, enter recovery and retransmit
 			// the lost segments.
-			s.cc.HandleLossDetected()
+			s.handleLossDetected()
 			s.enterRecovery()
 			fastRetransmit = true
 		}

@@ -24,19 +24,19 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/internal/tcp"
 )
 
-// After a spurious RTO, the data in flight is not sent again. With an undo of
-// cwnd, new data goes out.
+// After a spurious RTO, the data in flight is not sent again. The undo restores
+// cwnd, so new data goes out.
 func TestSpuriousRTOResponse(t *testing.T) {
 	cases := []struct {
 		cc string
-		// wantNew is the count of new segments after the undo. Cubic keeps
-		// the cwnd of the RTO, so it sends none.
+		// wantNew is the count of new segments after the undo.
 		wantNew int
-		// wantCwnd is the cwnd after the undo, or 0 for no check. Cubic
-		// adds the ACKed segment to the cwnd of 1 of the RTO.
-		wantCwnd int
+		// wantCwnd and wantSsthresh are the values after the undo, or 0 for no
+		// check. The flow is in slow start before the RTO.
+		wantCwnd, wantSsthresh int
 	}{
-		{cc: "cubic", wantNew: 0, wantCwnd: 2},
+		{cc: "cubic", wantNew: 5, wantCwnd: InitialCwnd, wantSsthresh: InitialSsthresh},
+		{cc: "reno", wantNew: 5, wantCwnd: InitialCwnd, wantSsthresh: InitialSsthresh},
 		{cc: "bbr", wantNew: 5},
 	}
 	for _, tc := range cases {
@@ -95,6 +95,9 @@ func TestSpuriousRTOResponse(t *testing.T) {
 			}
 			if tc.wantCwnd != 0 && s.SndCwnd != tc.wantCwnd {
 				t.Errorf("cwnd %d, want %d", s.SndCwnd, tc.wantCwnd)
+			}
+			if tc.wantSsthresh != 0 && s.Ssthresh != tc.wantSsthresh {
+				t.Errorf("ssthresh %d, want %d", s.Ssthresh, tc.wantSsthresh)
 			}
 			if want := len(first) - 1 + newSegs; s.Outstanding != want {
 				t.Errorf("outstanding %d, want %d", s.Outstanding, want)
@@ -321,6 +324,7 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 				p.ack(o+5*mss, 65535)
 				p.readAll()
 			}
+			_, preRTO := snd()
 			for i := 0; i < 100 && stats.Timeouts.Value() == 0; i++ {
 				p.clock.Advance(250 * time.Millisecond)
 				p.readAll()
@@ -380,11 +384,15 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 			if state != tc.wantState {
 				t.Errorf("state %v, want %v", state, tc.wantState)
 			}
+			if tc.scenario == spuriousSACKFirst {
+				// The undo restores the ssthresh from before the RTO.
+				ssthresh = preRTO
+			}
 			wantRecoveries := recoveries
 			if tc.wantState == tcpip.SACKRecovery {
 				wantRecoveries++
 			} else if gotSsthresh != ssthresh {
-				t.Errorf("ssthresh %d, want %d of the RTO", gotSsthresh, ssthresh)
+				t.Errorf("ssthresh %d, want %d", gotSsthresh, ssthresh)
 			}
 			if got := stats.SACKRecovery.Value(); got != wantRecoveries {
 				t.Errorf("SACK recoveries %d, want %d", got, wantRecoveries)
@@ -623,6 +631,77 @@ func TestRTOSsthreshOncePerWindow(t *testing.T) {
 				}
 			case gotSsthresh != ssthresh || gotWMax != wmax:
 				t.Errorf("ssthresh %d WMax %.2f after the RTO, want %d and %.2f", gotSsthresh, gotWMax, ssthresh, wmax)
+			}
+		})
+	}
+}
+
+// The undo of a spurious RTO restores cwnd and ssthresh from before the
+// decrease, as Linux tcp_undo_cwnd_reduction. Cubic then starts a new epoch at
+// that cwnd.
+func TestRTOUndoRestoresCwnd(t *testing.T) {
+	cases := []struct {
+		name string
+		cc   string
+		// ca has the RTO in congestion avoidance, after a SACK recovery. Else
+		// the RTO is in a SACK recovery that started in slow start.
+		ca bool
+	}{
+		{name: "cubic in congestion avoidance", cc: "cubic", ca: true},
+		{name: "reno in congestion avoidance", cc: "reno", ca: true},
+		{name: "cubic RTO in SACK recovery", cc: "cubic"},
+		{name: "reno RTO in SACK recovery", cc: "reno"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newSimPeerTS(t, tc.cc)
+			mss := p.mss()
+			snd := func() (cwnd, ssthresh int) {
+				p.ep.LockUser()
+				defer p.ep.UnlockUser()
+				return p.ep.snd.SndCwnd, p.ep.snd.Ssthresh
+			}
+			p.clock.Advance(time.Millisecond)
+			p.write(10 * mss)
+			first := p.readAll()
+			// cwnd and ssthresh are the values before the decrease.
+			cwnd, ssthresh := snd()
+			p.clock.Advance(10 * time.Millisecond)
+			sack := [2]int{2 * mss, 10 * mss}
+			p.ack(0, 65535, sack)
+			p.readAll()
+			// The test ends with an ACK of ackTo that echoes ecr.
+			ackTo, ecr, sacks := mss, first[0].tsVal, [][2]int{sack}
+			if tc.ca {
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(10*mss, 65535)
+				p.clock.Advance(time.Millisecond)
+				p.write(10 * mss)
+				second := p.readAll()
+				cwnd, ssthresh = snd()
+				ackTo, ecr, sacks = 11*mss, second[0].tsVal, nil
+			}
+			fireRTO(t, p, 1)
+			p.clock.Advance(10 * time.Millisecond)
+			p.ackEcr(ackTo, 65535, ecr, sacks...)
+			p.readAll()
+			if got := p.ep.stack.Stats().TCP.SpuriousRTORecovery.Value(); got != 1 {
+				t.Fatalf("spurious RTO recoveries %d, want 1", got)
+			}
+			gotCwnd, gotSsthresh := snd()
+			if gotCwnd != cwnd {
+				t.Errorf("cwnd %d after the undo, want %d", gotCwnd, cwnd)
+			}
+			if want := max(ssthresh, cwnd/2+cwnd/4); gotSsthresh != want {
+				t.Errorf("ssthresh %d after the undo, want %d", gotSsthresh, want)
+			}
+			p.ep.LockUser()
+			defer p.ep.UnlockUser()
+			if c, ok := p.ep.snd.cc.(*cubicState); ok && gotCwnd >= gotSsthresh {
+				if c.K != 0 || c.WMax != float64(gotCwnd) {
+					t.Errorf("cubic K %.2f WMax %.2f after the undo, want 0 and %d", c.K, c.WMax, gotCwnd)
+				}
 			}
 		})
 	}

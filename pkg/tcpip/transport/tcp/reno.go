@@ -115,6 +115,9 @@ func (r *renoState) HandleRTOExpired(reduce bool) {
 	r.s.SndCwnd = 1
 }
 
+// HandleRTOUndone implements congestionControl.HandleRTOUndone.
+func (r *renoState) HandleRTOUndone() {}
+
 // PostRecovery implements congestionControl.PostRecovery.
 func (r *renoState) PostRecovery() {
 	// noop.
