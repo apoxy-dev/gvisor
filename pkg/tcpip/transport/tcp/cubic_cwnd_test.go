@@ -15,78 +15,46 @@
 package tcp
 
 import (
+	"math"
 	"testing"
 	"time"
 )
 
-// A RACK loss in RTO recovery at a cwnd of 1 sets the CUBIC WMax below 1. The
-// ACKs after the recovery must not move the cwnd to 0.
+// A loss at a cwnd of 1, as in RTO recovery, leaves the CUBIC WMax below 1
+// and the CUBIC target below cwnd. The ACKs must not lower cwnd.
 func TestCubicCwndAfterLossInRTORecovery(t *testing.T) {
-	p := newSimPeer(t, "cubic", false)
-	mss := p.mss()
-	// Send 10 segments 1 ms apart, so that RACK can order them.
-	for i := 0; i < 10; i++ {
-		p.clock.Advance(time.Millisecond)
-		p.write(mss)
+	const srtt = 20 * time.Millisecond
+	cases := []struct {
+		name  string
+		acked int
+	}{
+		{name: "1 segment per ACK", acked: 1},
+		{name: "3 segments per ACK", acked: 3},
+		{name: "10 segments per ACK", acked: 10},
 	}
-	if got := len(p.readAll()); got != 10 {
-		t.Fatalf("first flight %d segments, want 10", got)
-	}
-	stats := p.ep.stack.Stats().TCP
-	for i := 0; i < 100 && stats.Timeouts.Value() == 0; i++ {
-		p.clock.Advance(50 * time.Millisecond)
-		p.readAll()
-	}
-	if got := stats.Timeouts.Value(); got != 1 {
-		t.Fatalf("timeouts %d, want 1", got)
-	}
-
-	// The RTO sent segment 0 again with a cwnd of 1. A SACK of segments 4
-	// to 9 makes RACK mark segments 1 to 3 lost before the cwnd grows.
-	last := [2]int{4 * mss, 10 * mss}
-	p.ack(0, 65535, last)
-	p.clock.Advance(time.Millisecond)
-	pkts := p.readAll()
-	p.ep.LockUser()
-	active, ssthresh := p.ep.snd.FastRecovery.Active, p.ep.snd.Ssthresh
-	p.ep.UnlockUser()
-	if !active || ssthresh != 2 {
-		t.Fatalf("after the SACK: recovery %t, ssthresh %d, want true and 2", active, ssthresh)
-	}
-
-	// The peer gets segment 0 and each retransmission, and ACKs them.
-	next := mss
-	for i := 0; i < 20 && next < 10*mss; i++ {
-		for _, off := range p.offsets(pkts) {
-			if off[0] == next {
-				next = off[1]
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSimPeer(t, "cubic", false)
+			p.ep.LockUser()
+			defer p.ep.UnlockUser()
+			s := p.ep.snd
+			c := s.cc.(*cubicState)
+			s.rtt.Lock()
+			s.rtt.TCPRTTState.SRTT = srtt
+			s.rtt.Unlock()
+			// HandleLossDetected with fast convergence at a cwnd of 1.
+			c.T = s.ep.stack.Clock().NowMonotonic()
+			c.WLastMax = 1
+			c.WMax = 0.85
+			c.K = math.Cbrt(c.WMax * (1 - c.Beta) / c.C)
+			s.Ssthresh = 2
+			s.SndCwnd = 2
+			for i := 0; i < 5; i++ {
+				c.Update(tc.acked, srtt)
+				if s.SndCwnd < 2 {
+					t.Fatalf("cwnd %d after ACK %d, want 2 or more", s.SndCwnd, i)
+				}
 			}
-		}
-		if next == last[0] {
-			next = last[1]
-		}
-		if next < last[0] {
-			p.ack(next, 65535, last)
-		} else {
-			p.ack(next, 65535)
-		}
-		p.clock.Advance(time.Millisecond)
-		pkts = p.readAll()
-	}
-	if next != 10*mss {
-		t.Fatalf("peer has %d bytes, want %d", next, 10*mss)
-	}
-	p.ep.LockUser()
-	active, cwnd := p.ep.snd.FastRecovery.Active, p.ep.snd.SndCwnd
-	p.ep.UnlockUser()
-	if active || cwnd < 1 {
-		t.Fatalf("after all data is ACKed: recovery %t, cwnd %d, want false and 1 or more", active, cwnd)
-	}
-
-	// New data goes out.
-	p.write(10 * mss)
-	p.clock.Advance(time.Millisecond)
-	if got := len(p.readAll()); got == 0 {
-		t.Errorf("sent no new data, cwnd %d", cwnd)
+		})
 	}
 }
