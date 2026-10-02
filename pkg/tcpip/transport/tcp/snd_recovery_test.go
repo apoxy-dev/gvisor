@@ -539,3 +539,91 @@ func TestSpuriousRTOInRecovery(t *testing.T) {
 		})
 	}
 }
+
+// An RTO lowers ssthresh only one time for each window, as in Linux
+// tcp_enter_loss. cwnd is 1 after each RTO.
+func TestRTOSsthreshOncePerWindow(t *testing.T) {
+	const (
+		// rtos has no ACK between the RTOs.
+		rtos = iota
+		// partialACK has an ACK of one segment before the last RTO.
+		partialACK
+		// inSACKRecovery has the RTO in SACK recovery.
+		inSACKRecovery
+		// afterSACKRecovery has the RTO after the end of a SACK recovery.
+		afterSACKRecovery
+	)
+	cases := []struct {
+		name     string
+		cc       string
+		scenario int
+		// n is the count of RTOs.
+		n uint64
+		// reduce is set if the last RTO lowers ssthresh.
+		reduce bool
+	}{
+		{name: "cubic RTO from Open", cc: "cubic", scenario: rtos, n: 1, reduce: true},
+		{name: "cubic 2nd RTO", cc: "cubic", scenario: rtos, n: 2},
+		{name: "cubic 3rd RTO", cc: "cubic", scenario: rtos, n: 3},
+		{name: "reno 2nd RTO", cc: "reno", scenario: rtos, n: 2},
+		{name: "bbr 2nd RTO", cc: "bbr", scenario: rtos, n: 2},
+		// Linux also lowers ssthresh again after SndUna moves.
+		{name: "cubic 2nd RTO after a partial ACK", cc: "cubic", scenario: partialACK, n: 2, reduce: true},
+		{name: "cubic RTO in SACK recovery", cc: "cubic", scenario: inSACKRecovery, n: 1},
+		{name: "reno RTO in SACK recovery", cc: "reno", scenario: inSACKRecovery, n: 1},
+		{name: "cubic RTO after a SACK recovery", cc: "cubic", scenario: afterSACKRecovery, n: 1, reduce: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newSimPeerTS(t, tc.cc)
+			mss := p.mss()
+			snd := func() (cwnd, ssthresh int, wmax float64) {
+				p.ep.LockUser()
+				defer p.ep.UnlockUser()
+				s := p.ep.snd
+				if c, ok := s.cc.(*cubicState); ok {
+					wmax = c.WMax
+				}
+				return s.SndCwnd, s.Ssthresh, wmax
+			}
+			p.clock.Advance(time.Millisecond)
+			p.write(10 * mss)
+			p.readAll()
+			for i := uint64(1); i < tc.n; i++ {
+				fireRTO(t, p, i)
+			}
+			switch tc.scenario {
+			case partialACK:
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(mss, 65535)
+				p.readAll()
+			case inSACKRecovery, afterSACKRecovery:
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(0, 65535, [2]int{2 * mss, 10 * mss})
+				p.readAll()
+				if tc.scenario == afterSACKRecovery {
+					p.clock.Advance(10 * time.Millisecond)
+					p.ack(10*mss, 65535)
+					p.clock.Advance(time.Millisecond)
+					p.write(10 * mss)
+					p.readAll()
+				}
+			}
+			cwnd, ssthresh, wmax := snd()
+			fireRTO(t, p, tc.n)
+			gotCwnd, gotSsthresh, gotWMax := snd()
+			if gotCwnd != 1 {
+				t.Errorf("cwnd %d after the RTO, want 1", gotCwnd)
+			}
+			switch {
+			case tc.reduce:
+				if want := max(int(float64(cwnd)*0.7), 2); gotSsthresh != want {
+					t.Errorf("ssthresh %d after the RTO at cwnd %d, want %d", gotSsthresh, cwnd, want)
+				}
+			case gotSsthresh != ssthresh || gotWMax != wmax:
+				t.Errorf("ssthresh %d WMax %.2f after the RTO, want %d and %.2f", gotSsthresh, gotWMax, ssthresh, wmax)
+			}
+		})
+	}
+}

@@ -70,8 +70,9 @@ type congestionControl interface {
 	// retransmit.
 	HandleLossDetected()
 
-	// HandleRTOExpired is invoked when the retransmit timer expires.
-	HandleRTOExpired()
+	// HandleRTOExpired is invoked when the retransmit timer expires. reduce
+	// is false if ssthresh was already lowered for this window.
+	HandleRTOExpired(reduce bool)
 
 	// Update is invoked when processing inbound acks. It's passed the
 	// number of packet's that were acked by the most recent cumulative
@@ -180,6 +181,10 @@ type sender struct {
 	// segment after entering an RTO for the first time as described in
 	// RFC3522 Section 3.2.
 	retransmitTS uint32
+
+	// rtoRetries is the number of RTOs since SndUna last moved, as Linux
+	// icsk_retransmits. Not saved: checkpoint and restore are not used.
+	rtoRetries int `state:"nosave"`
 
 	// startCork start corking the segments.
 	startCork bool
@@ -598,6 +603,12 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 		s.RTO = remaining
 	}
 
+	// As in Linux tcp_enter_loss, an RTO lowers ssthresh only one time for each
+	// window: not in recovery, and not again in RTO recovery before SndUna moves.
+	reduce := s.state == tcpip.Open || s.state == tcpip.Disorder ||
+		s.FastRecovery.Last.LessThan(s.SndUna) ||
+		(s.state == tcpip.RTORecovery && s.rtoRetries == 0)
+
 	// See: https://tools.ietf.org/html/rfc6582#section-3.2 Step 4.
 	//
 	// Retransmit timeouts:
@@ -618,7 +629,8 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 	s.recordRetransmitTS()
 
 	s.state = tcpip.RTORecovery
-	s.cc.HandleRTOExpired()
+	s.cc.HandleRTOExpired(reduce)
+	s.rtoRetries++
 
 	// Mark the next segment to be sent as the first unacknowledged one and
 	// start sending again. Set the number of outstanding packets to 0 so
@@ -1720,6 +1732,7 @@ func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 		// Remove all acknowledged data from the write list.
 		acked := s.SndUna.Size(ack)
 		s.SndUna = ack
+		s.rtoRetries = 0
 		ackLeft := acked
 		originalOutstanding := s.Outstanding
 		for ackLeft > 0 {

@@ -278,17 +278,19 @@ func (c *cubicState) HandleLossDetected() {
 // HandleRTOExpired implements congestionContrl.HandleRTOExpired.
 //
 // +checklocks:c.s.ep.mu
-func (c *cubicState) HandleRTOExpired() {
+func (c *cubicState) HandleRTOExpired(reduce bool) {
 	// See: https://tools.ietf.org/html/rfc8312#section-4.6
 	c.T = c.s.ep.stack.Clock().NowMonotonic()
 	c.numCongestionEvents = 0
-	c.WLastMax = c.WMax
-	c.WMax = float64(c.s.SndCwnd)
+	if reduce {
+		c.WLastMax = c.WMax
+		c.WMax = float64(c.s.SndCwnd)
 
-	c.fastConvergence()
+		c.fastConvergence()
 
-	// We lost a packet, so reduce ssthresh.
-	c.reduceSlowStartThreshold()
+		// We lost a packet, so reduce ssthresh.
+		c.reduceSlowStartThreshold()
+	}
 
 	// Reduce the congestion window to 1, i.e., enter slow-start. Per
 	// RFC 5681, page 7, we must use 1 regardless of the value of the

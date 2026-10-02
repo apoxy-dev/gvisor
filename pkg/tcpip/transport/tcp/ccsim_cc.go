@@ -348,8 +348,11 @@ var _ congestionControl = (*ccsimWrapper)(nil)
 
 func (w *ccsimWrapper) HandleLossDetected() { w.sim.HandleLossDetected() }
 
+// HandleRTOExpired does not use reduce: a sim congestion control does not
+// lower ssthresh at an RTO, and it saves its model one time for each recovery.
+//
 // +checklocks:w.s.ep.mu
-func (w *ccsimWrapper) HandleRTOExpired() {
+func (w *ccsimWrapper) HandleRTOExpired(bool) {
 	// An RTO marks all un-SACKed data lost and stops the sends that pacing holds.
 	w.s.ccsimMarkAllLost()
 	w.s.ccsim.recoveryResendPending = false
