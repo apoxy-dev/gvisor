@@ -263,6 +263,9 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 		spuriousSACKFirst
 		// lostRetransmit loses the retransmission of segment 2.
 		lostRetransmit
+		// newDataLost loses new segment 10, sent after the resends of
+		// segments 7 to 9. The resend at SndUna is older, so it is lost too.
+		newDataLost
 	)
 	cases := []struct {
 		name     string
@@ -284,6 +287,8 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 		{name: "bbr spurious RTO with a SACK first", cc: "bbr", scenario: spuriousSACKFirst, wantState: tcpip.Open},
 		{name: "cubic lost retransmission", cc: "cubic", scenario: lostRetransmit, wantState: tcpip.SACKRecovery},
 		{name: "reno lost retransmission", cc: "reno", scenario: lostRetransmit, wantState: tcpip.SACKRecovery},
+		{name: "cubic new data lost", cc: "cubic", scenario: newDataLost, wantState: tcpip.SACKRecovery},
+		{name: "reno new data lost", cc: "reno", scenario: newDataLost, wantState: tcpip.SACKRecovery},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,6 +383,25 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 				sent = p.offsets(p.readAll())
 				if len(sent) == 0 || sent[0] != [2]int{2 * mss, 3 * mss} {
 					t.Errorf("sent %v, want segment 2 first", sent)
+				}
+			case newDataLost:
+				p.write(5 * mss)
+				p.readAll()
+				// The cwnd grows from 1. After the ACK of segment 6, the resends
+				// of segments 7 to 9 go out, and then new segments from 10 on.
+				for _, ackTo := range []int{mss, 3 * mss, 7 * mss} {
+					p.clock.Advance(10 * time.Millisecond)
+					p.ack(ackTo, 65535)
+					sent = p.offsets(p.readAll())
+				}
+				if len(sent) < 5 || sent[0] != [2]int{7 * mss, 8 * mss} || sent[4] != [2]int{11 * mss, 12 * mss} {
+					t.Fatalf("sent %v, want segments 7 to 11 or more", sent)
+				}
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(7*mss, 65535, [2]int{11 * mss, 12 * mss})
+				sent = p.offsets(p.readAll())
+				if len(sent) == 0 || sent[0] != [2]int{7 * mss, 8 * mss} {
+					t.Errorf("sent %v, want segment 7 first", sent)
 				}
 			}
 			state, gotSsthresh := snd()
