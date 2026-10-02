@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -82,7 +83,13 @@ const (
 type IPTables struct {
 	connections ConnTrack
 
+	reaperMu sync.Mutex `state:"nosave"`
+	// +checklocks:reaperMu
 	reaper tcpip.Timer `state:"nosave"`
+	// reaperStopped is set when the stack closes, so that the reaper does not
+	// arm again.
+	// +checklocks:reaperMu
+	reaperStopped bool `state:"nosave"`
 
 	mu ipTablesRWMutex `state:"nosave"`
 	// v4Tables and v6tables map tableIDs to tables. They hold builtin

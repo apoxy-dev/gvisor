@@ -1999,7 +1999,8 @@ func (s *Stack) RestoreCleanupEndpoints(es []TransportEndpoint) {
 	}
 }
 
-// Close closes all currently registered transport endpoints.
+// Close closes all currently registered transport endpoints and stops the
+// iptables connection reaper.
 //
 // Endpoints created or modified during this call may not get closed.
 func (s *Stack) Close() {
@@ -2011,6 +2012,9 @@ func (s *Stack) Close() {
 	}
 	for _, p := range s.networkProtocols {
 		p.Close()
+	}
+	if s.tables != nil {
+		s.tables.stopReaper()
 	}
 }
 

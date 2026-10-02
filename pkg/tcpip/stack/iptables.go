@@ -607,7 +607,9 @@ func (it *IPTables) check(table Table, hook Hook, pkt *PacketBuffer, r *Route, a
 // beforeSave is invoked by stateify.
 func (it *IPTables) beforeSave() {
 	// Ensure the reaper exits cleanly.
+	it.reaperMu.Lock()
 	it.reaper.Stop()
+	it.reaperMu.Unlock()
 	// Prevent others from modifying the connection table.
 	it.connections.mu.Lock()
 }
@@ -620,10 +622,30 @@ func (it *IPTables) afterLoad(context.Context) {
 // startReaper periodically reaps timed out connections.
 func (it *IPTables) startReaper(interval time.Duration) {
 	bucket := 0
+	// The lock makes the callback read it.reaper after this write.
+	it.reaperMu.Lock()
+	defer it.reaperMu.Unlock()
+	if it.reaperStopped {
+		return
+	}
 	it.reaper = it.connections.clock.AfterFunc(interval, func() {
 		bucket, interval = it.connections.reapUnused(bucket, interval)
-		it.reaper.Reset(interval)
+		it.reaperMu.Lock()
+		defer it.reaperMu.Unlock()
+		if !it.reaperStopped {
+			it.reaper.Reset(interval)
+		}
 	})
+}
+
+// stopReaper stops the reaper for good.
+func (it *IPTables) stopReaper() {
+	it.reaperMu.Lock()
+	defer it.reaperMu.Unlock()
+	it.reaperStopped = true
+	if it.reaper != nil {
+		it.reaper.Stop()
+	}
 }
 
 // Preconditions:
