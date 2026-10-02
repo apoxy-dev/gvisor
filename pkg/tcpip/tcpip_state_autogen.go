@@ -2646,6 +2646,7 @@ func (t *TCPStats) StateFields() []string {
 		"SpuriousRecovery",
 		"SpuriousRTORecovery",
 		"ForwardMaxInFlightDrop",
+		"OutOfOrderDrop",
 	}
 }
 
@@ -2686,6 +2687,7 @@ func (t *TCPStats) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(29, &t.SpuriousRecovery)
 	stateSinkObject.Save(30, &t.SpuriousRTORecovery)
 	stateSinkObject.Save(31, &t.ForwardMaxInFlightDrop)
+	stateSinkObject.Save(32, &t.OutOfOrderDrop)
 }
 
 func (t *TCPStats) afterLoad(context.Context) {}
@@ -2724,6 +2726,7 @@ func (t *TCPStats) StateLoad(ctx context.Context, stateSourceObject state.Source
 	stateSourceObject.Load(29, &t.SpuriousRecovery)
 	stateSourceObject.Load(30, &t.SpuriousRTORecovery)
 	stateSourceObject.Load(31, &t.ForwardMaxInFlightDrop)
+	stateSourceObject.Load(32, &t.OutOfOrderDrop)
 }
 
 func (u *UDPStats) StateTypeName() string {

@@ -2292,6 +2292,10 @@ type TCPStats struct {
 	// dropped due to exceeding the maximum number of in-flight connection
 	// requests.
 	ForwardMaxInFlightDrop *StatCounter
+
+	// OutOfOrderDrop is the number of out-of-order segments dropped because
+	// the out-of-order queue used its share of the receive buffer.
+	OutOfOrderDrop *StatCounter
 }
 
 // UDPStats collects UDP-specific stats.

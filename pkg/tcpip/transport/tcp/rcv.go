@@ -502,6 +502,8 @@ func (r *receiver) handleRcvdSegment(s *segment) (drop bool, err tcpip.Error) {
 				s.IncRef()
 				heap.Push(&r.pendingRcvdSegments, s)
 				UpdateSACKBlocks(&r.ep.sack, segSeq, segSeq.Add(segLen), r.RcvNxt)
+			} else {
+				r.ep.stack.Stats().TCP.OutOfOrderDrop.Increment()
 			}
 
 			// Immediately send an ack so that the peer knows it may
