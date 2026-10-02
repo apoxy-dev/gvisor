@@ -15,6 +15,7 @@
 package tcp
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -237,6 +238,156 @@ func TestSackedOutAcrossRecovery(t *testing.T) {
 			p.readAll()
 			if got, _ := sacked(); got != 0 {
 				t.Errorf("after the ACK of all data: SackedOut %d, want 0", got)
+			}
+		})
+	}
+}
+
+// In RTO recovery, a RACK loss of data that was not sent again after the RTO
+// does not start a new recovery, as in Linux. A lost retransmission does.
+func TestRACKLossInRTORecovery(t *testing.T) {
+	const (
+		// sackAfterRTO is a duplicate ACK with a SACK of segments 4 to 9.
+		sackAfterRTO = iota
+		// ackAfterRTO is the ACK of the RTO retransmission and a SACK of
+		// segments 4 to 9.
+		ackAfterRTO
+		// reorderTimer has reordering before the RTO, so the reorder timer
+		// and not the ACK can mark segment 6 lost after a SACK of segment 7.
+		reorderTimer
+		// spuriousSACKFirst is a SACK of segments 1 to 4 and then the ACK of
+		// segments 0 to 4 that echoes the first send of segment 0.
+		spuriousSACKFirst
+		// lostRetransmit loses the retransmission of segment 2.
+		lostRetransmit
+	)
+	cases := []struct {
+		name     string
+		cc       string
+		scenario int
+		// wantState is the state at the end. SACKRecovery means one new
+		// recovery, with a new ssthresh.
+		wantState tcpip.CongestionControlState
+	}{
+		{name: "cubic SACK after the RTO", cc: "cubic", scenario: sackAfterRTO, wantState: tcpip.RTORecovery},
+		{name: "reno SACK after the RTO", cc: "reno", scenario: sackAfterRTO, wantState: tcpip.RTORecovery},
+		{name: "bbr SACK after the RTO", cc: "bbr", scenario: sackAfterRTO, wantState: tcpip.RTORecovery},
+		{name: "cubic ACK after the RTO", cc: "cubic", scenario: ackAfterRTO, wantState: tcpip.RTORecovery},
+		{name: "reno ACK after the RTO", cc: "reno", scenario: ackAfterRTO, wantState: tcpip.RTORecovery},
+		{name: "cubic reorder timer", cc: "cubic", scenario: reorderTimer, wantState: tcpip.RTORecovery},
+		{name: "reno reorder timer", cc: "reno", scenario: reorderTimer, wantState: tcpip.RTORecovery},
+		{name: "cubic spurious RTO with a SACK first", cc: "cubic", scenario: spuriousSACKFirst, wantState: tcpip.Open},
+		{name: "reno spurious RTO with a SACK first", cc: "reno", scenario: spuriousSACKFirst, wantState: tcpip.Open},
+		{name: "bbr spurious RTO with a SACK first", cc: "bbr", scenario: spuriousSACKFirst, wantState: tcpip.Open},
+		{name: "cubic lost retransmission", cc: "cubic", scenario: lostRetransmit, wantState: tcpip.SACKRecovery},
+		{name: "reno lost retransmission", cc: "reno", scenario: lostRetransmit, wantState: tcpip.SACKRecovery},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newSimPeerTS(t, tc.cc)
+			mss := p.mss()
+			stats := p.ep.stack.Stats().TCP
+			snd := func() (tcpip.CongestionControlState, int) {
+				p.ep.LockUser()
+				defer p.ep.UnlockUser()
+				return p.ep.snd.state, p.ep.snd.Ssthresh
+			}
+			// o is the offset of the first of the 10 segments.
+			o := 0
+			if tc.scenario == reorderTimer {
+				// An RTT of 20 ms gives a reorder window of 5 ms.
+				p.clock.Advance(time.Millisecond)
+				p.write(mss)
+				p.readAll()
+				p.clock.Advance(20 * time.Millisecond)
+				p.ack(mss, 65535)
+				p.readAll()
+				o = mss
+			}
+			// Send 10 segments 1 ms apart, so that RACK orders them by time.
+			for i := 0; i < 10; i++ {
+				p.clock.Advance(time.Millisecond)
+				p.write(mss)
+			}
+			first := p.readAll()
+			if len(first) != 10 {
+				t.Fatalf("first flight %d segments, want 10", len(first))
+			}
+			if tc.scenario == reorderTimer {
+				// Segment 4 comes before segments 0 to 3, in the reorder window.
+				p.clock.Advance(20 * time.Millisecond)
+				p.ack(o, 65535, [2]int{o + 4*mss, o + 5*mss})
+				p.ack(o+5*mss, 65535)
+				p.readAll()
+			}
+			for i := 0; i < 100 && stats.Timeouts.Value() == 0; i++ {
+				p.clock.Advance(250 * time.Millisecond)
+				p.readAll()
+			}
+			if got := stats.Timeouts.Value(); got != 1 {
+				t.Fatalf("timeouts %d, want 1", got)
+			}
+			_, ssthresh := snd()
+			recoveries := stats.SACKRecovery.Value()
+			var sent [][2]int
+			switch tc.scenario {
+			case sackAfterRTO:
+				p.ack(0, 65535, [2]int{4 * mss, 10 * mss})
+				p.readAll()
+			case ackAfterRTO:
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(mss, 65535, [2]int{4 * mss, 10 * mss})
+				sent = p.offsets(p.readAll())
+				// Go-back-N sends the next 2 segments with a cwnd of 2.
+				if want := [][2]int{{mss, 2 * mss}, {2 * mss, 3 * mss}}; !reflect.DeepEqual(sent, want) {
+					t.Errorf("sent %v, want %v", sent, want)
+				}
+			case reorderTimer:
+				p.clock.Advance(time.Millisecond)
+				p.ack(o+5*mss, 65535, [2]int{o + 7*mss, o + 8*mss})
+				p.readAll()
+				p.clock.Advance(20 * time.Millisecond)
+				p.readAll()
+			case spuriousSACKFirst:
+				p.ack(0, 65535, [2]int{mss, 5 * mss})
+				p.readAll()
+				retransmits := stats.Retransmits.Value()
+				p.ackEcr(5*mss, 65535, first[0].tsVal)
+				p.readAll()
+				if got := stats.SpuriousRTORecovery.Value(); got != 1 {
+					t.Errorf("spurious RTO recoveries %d, want 1", got)
+				}
+				if got := stats.Retransmits.Value(); got != retransmits {
+					t.Errorf("retransmits %d after the undo, want %d", got, retransmits)
+				}
+			case lostRetransmit:
+				// Segments 1 and 2 go out, then segments 3 and 4.
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(mss, 65535)
+				p.readAll()
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(2*mss, 65535)
+				p.readAll()
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(2*mss, 65535, [2]int{3 * mss, 4 * mss})
+				sent = p.offsets(p.readAll())
+				if len(sent) == 0 || sent[0] != [2]int{2 * mss, 3 * mss} {
+					t.Errorf("sent %v, want segment 2 first", sent)
+				}
+			}
+			state, gotSsthresh := snd()
+			if state != tc.wantState {
+				t.Errorf("state %v, want %v", state, tc.wantState)
+			}
+			wantRecoveries := recoveries
+			if tc.wantState == tcpip.SACKRecovery {
+				wantRecoveries++
+			} else if gotSsthresh != ssthresh {
+				t.Errorf("ssthresh %d, want %d of the RTO", gotSsthresh, ssthresh)
+			}
+			if got := stats.SACKRecovery.Value(); got != wantRecoveries {
+				t.Errorf("SACK recoveries %d, want %d", got, wantRecoveries)
 			}
 		})
 	}

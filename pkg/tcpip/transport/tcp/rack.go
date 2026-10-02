@@ -374,6 +374,11 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 	var timeout time.Duration
 	numLost := 0
 	for seg := rc.snd.writeList.Front(); seg != nil && seg.xmitCount != 0; seg = seg.Next() {
+		// In RTO recovery, the segments from writeNext on are not sent again
+		// yet. The RTO counts them lost, so RACK does not (Linux skips them too).
+		if rc.snd.state == tcpip.RTORecovery && seg == rc.snd.writeNext {
+			break
+		}
 		if rc.snd.ep.scoreboard.IsSACKED(seg.sackBlock()) {
 			continue
 		}
