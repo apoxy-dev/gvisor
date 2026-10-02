@@ -138,6 +138,8 @@ func TranslateNetstackError(err tcpip.Error) *Error {
 		return ErrBroadcastDisabled
 	case *tcpip.ErrNotPermitted:
 		return ErrNotPermittedNet
+	case *tcpip.ErrPermissionDenied:
+		return ErrPermissionDenied
 	case *tcpip.ErrAddressFamilyNotSupported:
 		return ErrAddressFamilyNotSupported
 	case *tcpip.ErrBadBuffer:

@@ -488,6 +488,20 @@ func (*ErrNotSupported) IgnoreStats() bool {
 }
 func (*ErrNotSupported) String() string { return "operation not supported" }
 
+// ErrPermissionDenied indicates that the destination, or a router on the
+// path, does not permit communication with the destination.
+//
+// +stateify savable
+type ErrPermissionDenied struct{}
+
+func (*ErrPermissionDenied) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrPermissionDenied) IgnoreStats() bool {
+	return false
+}
+func (*ErrPermissionDenied) String() string { return "permission denied" }
+
 // ErrPortInUse indicates the provided port is in use.
 //
 // +stateify savable

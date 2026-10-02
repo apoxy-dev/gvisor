@@ -111,6 +111,31 @@ func (*icmpv6DestinationAddressUnreachableSockError) Kind() stack.TransportError
 	return stack.DestinationHostUnreachableTransportError
 }
 
+var _ stack.TransportError = (*icmpv6DestinationProhibitedSockError)(nil)
+
+// icmpv6DestinationProhibitedSockError is an ICMPv6 Destination Unreachable
+// error with code 1 (prohibited), 5 (policy) or 6 (reject route).
+//
+// It indicates that the destination, or a router on the path, does not permit
+// communication with the destination.
+//
+// +stateify savable
+type icmpv6DestinationProhibitedSockError struct {
+	icmpv6DestinationUnreachableSockError
+
+	code header.ICMPv6Code
+}
+
+// Code implements tcpip.SockErrorCause.
+func (e *icmpv6DestinationProhibitedSockError) Code() uint8 {
+	return uint8(e.code)
+}
+
+// Kind implements stack.TransportError.
+func (*icmpv6DestinationProhibitedSockError) Kind() stack.TransportErrorKind {
+	return stack.DestinationProhibitedTransportError
+}
+
 var _ stack.TransportError = (*icmpv6PacketTooBigSockError)(nil)
 
 // icmpv6PacketTooBigSockError is an ICMPv6 Packet Too Big error.
@@ -337,6 +362,9 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 		switch h.Code() {
 		case header.ICMPv6NetworkUnreachable:
 			e.handleControl(&icmpv6DestinationNetworkUnreachableSockError{}, pkt)
+		case header.ICMPv6Prohibited, header.ICMPv6Policy, header.ICMPv6RejectRoute:
+			// As on Linux, a connect to the destination stops with EACCES.
+			e.handleControl(&icmpv6DestinationProhibitedSockError{code: h.Code()}, pkt)
 		case header.ICMPv6AddressUnreachable:
 			// As on Linux, a connect to the address stops with host unreachable.
 			e.handleControl(&icmpv6DestinationAddressUnreachableSockError{}, pkt)

@@ -722,6 +722,27 @@ func (e *ErrNotSupported) afterLoad(context.Context) {}
 func (e *ErrNotSupported) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 }
 
+func (e *ErrPermissionDenied) StateTypeName() string {
+	return "pkg/tcpip.ErrPermissionDenied"
+}
+
+func (e *ErrPermissionDenied) StateFields() []string {
+	return []string{}
+}
+
+func (e *ErrPermissionDenied) beforeSave() {}
+
+// +checklocksignore
+func (e *ErrPermissionDenied) StateSave(stateSinkObject state.Sink) {
+	e.beforeSave()
+}
+
+func (e *ErrPermissionDenied) afterLoad(context.Context) {}
+
+// +checklocksignore
+func (e *ErrPermissionDenied) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+}
+
 func (e *ErrPortInUse) StateTypeName() string {
 	return "pkg/tcpip.ErrPortInUse"
 }
@@ -3284,6 +3305,7 @@ func init() {
 	state.Register((*ErrNotConnected)(nil))
 	state.Register((*ErrNotPermitted)(nil))
 	state.Register((*ErrNotSupported)(nil))
+	state.Register((*ErrPermissionDenied)(nil))
 	state.Register((*ErrPortInUse)(nil))
 	state.Register((*ErrQueueSizeNotSupported)(nil))
 	state.Register((*ErrTimeout)(nil))

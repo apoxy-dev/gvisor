@@ -104,6 +104,34 @@ func (i *icmpv6DestinationAddressUnreachableSockError) StateLoad(ctx context.Con
 	stateSourceObject.Load(0, &i.icmpv6DestinationUnreachableSockError)
 }
 
+func (e *icmpv6DestinationProhibitedSockError) StateTypeName() string {
+	return "pkg/tcpip/network/ipv6.icmpv6DestinationProhibitedSockError"
+}
+
+func (e *icmpv6DestinationProhibitedSockError) StateFields() []string {
+	return []string{
+		"icmpv6DestinationUnreachableSockError",
+		"code",
+	}
+}
+
+func (e *icmpv6DestinationProhibitedSockError) beforeSave() {}
+
+// +checklocksignore
+func (e *icmpv6DestinationProhibitedSockError) StateSave(stateSinkObject state.Sink) {
+	e.beforeSave()
+	stateSinkObject.Save(0, &e.icmpv6DestinationUnreachableSockError)
+	stateSinkObject.Save(1, &e.code)
+}
+
+func (e *icmpv6DestinationProhibitedSockError) afterLoad(context.Context) {}
+
+// +checklocksignore
+func (e *icmpv6DestinationProhibitedSockError) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &e.icmpv6DestinationUnreachableSockError)
+	stateSourceObject.Load(1, &e.code)
+}
+
 func (e *icmpv6PacketTooBigSockError) StateTypeName() string {
 	return "pkg/tcpip/network/ipv6.icmpv6PacketTooBigSockError"
 }
@@ -1017,6 +1045,7 @@ func init() {
 	state.Register((*icmpv6DestinationNetworkUnreachableSockError)(nil))
 	state.Register((*icmpv6DestinationPortUnreachableSockError)(nil))
 	state.Register((*icmpv6DestinationAddressUnreachableSockError)(nil))
+	state.Register((*icmpv6DestinationProhibitedSockError)(nil))
 	state.Register((*icmpv6PacketTooBigSockError)(nil))
 	state.Register((*endpointMu)(nil))
 	state.Register((*dadMu)(nil))

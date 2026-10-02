@@ -103,6 +103,10 @@ const (
 	// DestinationHostDownTransportError indicates that the destination host is
 	// down.
 	DestinationHostDownTransportError
+
+	// DestinationProhibitedTransportError indicates that the destination, or a
+	// router on the path, does not permit communication with the destination.
+	DestinationProhibitedTransportError
 )
 
 // TransportError is a marker interface for errors that may be handled by the

@@ -2997,6 +2997,8 @@ func (e *Endpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketB
 		e.onICMPError(&tcpip.ErrNoNet{}, transErr, pkt)
 	case stack.DestinationHostDownTransportError:
 		e.onICMPError(&tcpip.ErrHostDown{}, transErr, pkt)
+	case stack.DestinationProhibitedTransportError:
+		e.onICMPError(&tcpip.ErrPermissionDenied{}, transErr, pkt)
 	}
 }
 
