@@ -42,6 +42,9 @@ var (
 // receive buffer. Full 1460 B segments use about 1.4x and always fit.
 const oooMTU = 576
 
+// oooDeadline bounds the transfer. It is long for slow -race runs.
+const oooDeadline = 60 * time.Second
+
 // TestOutOfOrderDrop drops the first data segment of a transfer. The segments
 // after it go to the out-of-order queue, and the receiver drops the segments
 // that do not fit in the share of the receive buffer for that queue.
@@ -99,7 +102,7 @@ func TestOutOfOrderDrop(t *testing.T) {
 					return
 				}
 				defer c.Close()
-				_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+				_ = c.SetReadDeadline(time.Now().Add(oooDeadline))
 				b, _ := io.ReadAll(c)
 				got <- b
 			}()
@@ -107,7 +110,7 @@ func TestOutOfOrderDrop(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DialTCP: %v", err)
 			}
-			_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = c.SetWriteDeadline(time.Now().Add(oooDeadline))
 			if _, err := c.Write(data); err != nil {
 				t.Fatalf("Write: %v", err)
 			}

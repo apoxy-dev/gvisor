@@ -1263,6 +1263,12 @@ func wndFromSpace(space int) int {
 	return space >> rcvAdvWndScale
 }
 
+// spaceFromWnd returns the buffer space that gives a window of wnd, as Linux
+// tcp_space_from_win.
+func spaceFromWnd(wnd int) int {
+	return wnd << rcvAdvWndScale
+}
+
 // initialReceiveWindow returns the initial receive window to advertise in the
 // SYN/SYN-ACK.
 func (e *Endpoint) initialReceiveWindow() int {
@@ -1335,20 +1341,24 @@ func (e *Endpoint) ModerateRecvBuf(copied int) {
 			rcvWnd = minRcvWnd
 		}
 
+		// The buffer holds the window and the segment overhead, as
+		// Linux sets sk_rcvbuf from tcp_space_from_win.
+		rcvBuf := spaceFromWnd(rcvWnd)
+
 		// Cap the auto tuned buffer size by the maximum permissible
 		// receive buffer size.
-		if max := e.maxReceiveBufferSize(); rcvWnd > max {
-			rcvWnd = max
+		if max := e.maxReceiveBufferSize(); rcvBuf > max {
+			rcvBuf = max
 		}
 
 		// We do not adjust downwards as that can cause the receiver to
 		// reject valid data that might already be in flight as the
 		// acceptable window will shrink.
 		rcvBufSize := int(e.ops.GetReceiveBufferSize())
-		if rcvWnd > rcvBufSize {
+		if rcvBuf > rcvBufSize {
 			availBefore := wndFromSpace(e.receiveBufferAvailableLocked(rcvBufSize))
-			e.ops.SetReceiveBufferSize(int64(rcvWnd), false /* notify */)
-			availAfter := wndFromSpace(e.receiveBufferAvailableLocked(rcvWnd))
+			e.ops.SetReceiveBufferSize(int64(rcvBuf), false /* notify */)
+			availAfter := wndFromSpace(e.receiveBufferAvailableLocked(rcvBuf))
 			if crossed, above := e.windowCrossedACKThresholdLocked(availAfter-availBefore, rcvBufSize); crossed && above {
 				sendNonZeroWindowUpdate = true
 			}
