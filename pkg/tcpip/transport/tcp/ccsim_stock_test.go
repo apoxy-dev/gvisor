@@ -208,6 +208,14 @@ func TestSwitchCongestionControl(t *testing.T) {
 			}
 			p.ep.UnlockUser()
 			if tc.sacks != nil {
+				// All segments went out in the same tick as the SACKed one. An SRTT
+				// and an RTT above 0 give RACK a reorder window, so none is lost yet.
+				p.ep.LockUser()
+				s.rtt.Lock()
+				s.rtt.TCPRTTState.SRTT = 20 * time.Millisecond
+				s.rtt.Unlock()
+				p.ep.UnlockUser()
+				p.clock.Advance(time.Millisecond)
 				p.ack(0, 65535, tc.sacks...)
 				if got := p.offsets(p.readAll()); len(got) != 0 {
 					t.Fatalf("after the SACK, reno sent %v, want nothing", got)

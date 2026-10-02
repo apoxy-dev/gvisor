@@ -384,7 +384,9 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 		}
 
 		endSeq := seg.sequenceNumber.Add(seqnum.Size(seg.payloadSize()))
-		if seg.xmitTime.Before(rc.XmitTime) || (seg.xmitTime == rc.XmitTime && rc.EndSequence.LessThan(endSeq)) {
+		// A segment sent at the same time as RACK.xmit_ts is older if it ends
+		// first (RFC 8985 RACK_sent_after).
+		if seg.xmitTime.Before(rc.XmitTime) || (seg.xmitTime == rc.XmitTime && endSeq.LessThan(rc.EndSequence)) {
 			timeRemaining := seg.xmitTime.Sub(rcvTime) + rc.RTT + rc.ReoWnd
 			if timeRemaining <= 0 {
 				seg.lost = true
