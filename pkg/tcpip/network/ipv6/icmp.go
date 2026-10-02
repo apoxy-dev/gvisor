@@ -337,6 +337,9 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool, r
 		switch h.Code() {
 		case header.ICMPv6NetworkUnreachable:
 			e.handleControl(&icmpv6DestinationNetworkUnreachableSockError{}, pkt)
+		case header.ICMPv6AddressUnreachable:
+			// As on Linux, a connect to the address stops with host unreachable.
+			e.handleControl(&icmpv6DestinationAddressUnreachableSockError{}, pkt)
 		case header.ICMPv6PortUnreachable:
 			e.handleControl(&icmpv6DestinationPortUnreachableSockError{}, pkt)
 		}
