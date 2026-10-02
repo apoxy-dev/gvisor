@@ -392,3 +392,150 @@ func TestRACKLossInRTORecovery(t *testing.T) {
 		})
 	}
 }
+
+// fireRTO moves the clock until the RTO count is n. It returns the packets of
+// the step with the last RTO.
+func fireRTO(t *testing.T, p *simPeer, n uint64) []peerPkt {
+	t.Helper()
+	stats := p.ep.stack.Stats().TCP
+	var pkts []peerPkt
+	for i := 0; i < 100 && stats.Timeouts.Value() < n; i++ {
+		p.clock.Advance(250 * time.Millisecond)
+		pkts = p.readAll()
+	}
+	if got := stats.Timeouts.Value(); got != n {
+		t.Fatalf("timeouts %d, want %d", got, n)
+	}
+	return pkts
+}
+
+// tsValAt returns the TSVal of the last packet that starts at byte off.
+func tsValAt(t *testing.T, p *simPeer, pkts []peerPkt, off int) uint32 {
+	t.Helper()
+	for i := len(pkts) - 1; i >= 0; i-- {
+		if pkts[i].seq == p.at(off) {
+			return pkts[i].tsVal
+		}
+	}
+	t.Fatalf("no packet at %d in %v", off, p.offsets(pkts))
+	return 0
+}
+
+// After a 2nd RTO, or an RTO in recovery, the Eifel check uses the TSVal of the
+// first retransmission of the recovery, as Linux tcp_packet_delayed.
+func TestSpuriousRTOInRecovery(t *testing.T) {
+	const (
+		rtoFromOpen = iota
+		secondRTO
+		rtoInSACKRecovery
+		// lostRetransmit starts a SACK recovery in RTO recovery.
+		lostRetransmit
+	)
+	const (
+		echoFirstSend = iota
+		// echoFirstResend is the echo of the fast retransmit or of the 1st RTO resend.
+		echoFirstResend
+		echoLastResend
+	)
+	// tsHigh sets the top bit of the TSVals, so that they are negative as int32.
+	const tsHigh = 0x80000000
+	cases := []struct {
+		name     string
+		cc       string
+		scenario int
+		tsOffset uint32
+		echo     int
+		// want is the count of spurious recoveries.
+		want      uint64
+		wantState tcpip.CongestionControlState
+	}{
+		{name: "RTO from Open, echo of the RTO resend", cc: "cubic", scenario: rtoFromOpen, tsOffset: tsHigh, echo: echoLastResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "RTO from Open, echo of the first send", cc: "cubic", scenario: rtoFromOpen, tsOffset: tsHigh, echo: echoFirstSend, want: 1, wantState: tcpip.Open},
+		{name: "2nd RTO, echo of the 2nd resend", cc: "cubic", scenario: secondRTO, tsOffset: tsHigh, echo: echoLastResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "2nd RTO, echo of the 1st resend", cc: "cubic", scenario: secondRTO, tsOffset: tsHigh, echo: echoFirstResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "2nd RTO, echo of the first send", cc: "cubic", scenario: secondRTO, echo: echoFirstSend, want: 1, wantState: tcpip.Open},
+		{name: "RTO in SACK recovery, echo of the RTO resend", cc: "cubic", scenario: rtoInSACKRecovery, tsOffset: tsHigh, echo: echoLastResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "RTO in SACK recovery, echo of the fast retransmit", cc: "cubic", scenario: rtoInSACKRecovery, tsOffset: tsHigh, echo: echoFirstResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "RTO in SACK recovery, echo of the first send", cc: "cubic", scenario: rtoInSACKRecovery, echo: echoFirstSend, want: 1, wantState: tcpip.Open},
+		{name: "bbr RTO in SACK recovery, echo of the RTO resend", cc: "bbr", scenario: rtoInSACKRecovery, tsOffset: tsHigh, echo: echoLastResend, want: 0, wantState: tcpip.RTORecovery},
+		{name: "lost retransmission in RTO recovery", cc: "cubic", scenario: lostRetransmit, tsOffset: tsHigh, echo: echoLastResend, want: 0, wantState: tcpip.SACKRecovery},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newSimPeerTS(t, tc.cc)
+			p.ep.LockUser()
+			p.ep.TSOffset = tcp.NewTSOffset(tc.tsOffset)
+			p.ep.UnlockUser()
+			mss := p.mss()
+			p.clock.Advance(time.Millisecond)
+			p.write(mss)
+			ecr := tsValAt(t, p, p.readAll(), 0)
+			p.clock.Advance(time.Millisecond)
+			p.write(9 * mss)
+			p.readAll()
+			// The test ends with an ACK of ackTo with the SACK blocks sacks.
+			ackTo := mss
+			var sacks [][2]int
+			switch tc.scenario {
+			case rtoFromOpen:
+				resend := tsValAt(t, p, fireRTO(t, p, 1), 0)
+				if tc.echo != echoFirstSend {
+					ecr = resend
+				}
+			case secondRTO:
+				first := tsValAt(t, p, fireRTO(t, p, 1), 0)
+				last := tsValAt(t, p, fireRTO(t, p, 2), 0)
+				switch tc.echo {
+				case echoFirstResend:
+					ecr = first
+				case echoLastResend:
+					ecr = last
+				}
+			case rtoInSACKRecovery:
+				p.clock.Advance(10 * time.Millisecond)
+				sacks = [][2]int{{2 * mss, 10 * mss}}
+				p.ack(0, 65535, sacks...)
+				fast := tsValAt(t, p, p.readAll(), 0)
+				last := tsValAt(t, p, fireRTO(t, p, 1), 0)
+				switch tc.echo {
+				case echoFirstResend:
+					ecr = fast
+				case echoLastResend:
+					ecr = last
+				}
+			case lostRetransmit:
+				// Segments 1 and 2 go out, then segments 3 and 4. The SACK of
+				// segment 3 marks the resend of segment 2 lost.
+				fireRTO(t, p, 1)
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(mss, 65535)
+				p.readAll()
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(2*mss, 65535)
+				p.readAll()
+				p.clock.Advance(10 * time.Millisecond)
+				p.ack(2*mss, 65535, [2]int{3 * mss, 4 * mss})
+				ecr = tsValAt(t, p, p.readAll(), 2*mss)
+				// A partial ACK in the new SACK recovery.
+				ackTo = 4 * mss
+			}
+			p.clock.Advance(10 * time.Millisecond)
+			p.ackEcr(ackTo, 65535, ecr, sacks...)
+			p.readAll()
+			stats := p.ep.stack.Stats().TCP
+			if got := stats.SpuriousRecovery.Value(); got != tc.want {
+				t.Errorf("spurious recoveries %d, want %d", got, tc.want)
+			}
+			if got := stats.SpuriousRTORecovery.Value(); got != tc.want {
+				t.Errorf("spurious RTO recoveries %d, want %d", got, tc.want)
+			}
+			p.ep.LockUser()
+			state := p.ep.snd.state
+			p.ep.UnlockUser()
+			if state != tc.wantState {
+				t.Errorf("state %v, want %v", state, tc.wantState)
+			}
+		})
+	}
+}
