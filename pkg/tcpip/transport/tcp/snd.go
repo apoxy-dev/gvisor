@@ -416,7 +416,7 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 			nextSeg = seg
 		}
 
-		if s.ep.SACKPermitted && s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
+		if seg.acked {
 			// Update sackedOut for new maximum payload size.
 			s.SackedOut -= s.pCount(seg, oldMSS)
 			s.SackedOut += s.pCount(seg, s.MaxPayloadSize)
@@ -695,6 +695,10 @@ func (s *sender) splitSeg(seg *segment, size int) {
 	if seg.payloadSize() <= size {
 		return
 	}
+	sacked := 0
+	if seg.acked {
+		sacked = s.pCount(seg, s.MaxPayloadSize)
+	}
 	// Split this segment up.
 	nSeg := seg.clone()
 	nSeg.pkt.Data().TrimFront(size)
@@ -714,6 +718,10 @@ func (s *sender) splitSeg(seg *segment, size int) {
 		seg.flags ^= header.TCPFlagPsh
 	}
 	seg.pkt.Data().CapLength(size)
+	if seg.acked {
+		// Only seg keeps acked, so SackedOut keeps only the packets of seg.
+		s.SackedOut += s.pCount(seg, s.MaxPayloadSize) - sacked
+	}
 	s.ccsimSplitSegment(seg, nSeg)
 }
 
@@ -1152,7 +1160,6 @@ func (s *sender) enterRecovery() {
 	// the 3 duplicate ACKs and are now not in flight.
 	s.SndCwnd = s.Ssthresh + 3
 	s.ccsimEnterRecovery()
-	s.SackedOut = 0
 	s.DupAckCount = 0
 	s.FastRecovery.First = s.SndUna
 	s.FastRecovery.Last = s.SndNxt - 1
@@ -1761,7 +1768,9 @@ func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 			// already been accounted for in SetPipe().
 			if !s.ep.SACKPermitted || !s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
 				s.Outstanding -= s.pCount(seg, s.MaxPayloadSize)
-			} else {
+			}
+			// SackedOut counts the segments with acked set, as Linux sacked_out does.
+			if seg.acked {
 				s.SackedOut -= s.pCount(seg, s.MaxPayloadSize)
 			}
 			seg.DecRef()

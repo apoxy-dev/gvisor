@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/internal/tcp"
 )
 
@@ -165,6 +166,77 @@ func TestSpuriousDetectionTimestamps(t *testing.T) {
 			p.readAll()
 			if got := p.ep.stack.Stats().TCP.SpuriousRecovery.Value(); got != tc.want {
 				t.Errorf("spurious recoveries %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// SackedOut keeps the SACKed segments when recovery starts, and is 0 when all
+// data is ACKed.
+func TestSackedOutAcrossRecovery(t *testing.T) {
+	cases := []struct {
+		name string
+		cc   string
+		gso  bool
+		// writes are sent one at a time, 1 ms apart.
+		writes []int
+		sacks  [][2]int
+		// wantSacked is SackedOut in recovery.
+		wantSacked int
+		// rto is set if an RTO comes after the SACK. mss is a smaller MSS
+		// after the RTO, or 0.
+		rto bool
+		mss int
+	}{
+		{name: "cubic", cc: "cubic", writes: []int{peerMSS, 9 * peerMSS}, sacks: [][2]int{{100, 1000}}, wantSacked: 9},
+		{name: "fixedsim", cc: "fixedsim", writes: []int{peerMSS, 9 * peerMSS}, sacks: [][2]int{{100, 1000}}, wantSacked: 9},
+		// The RTO clears the scoreboard, but the segments stay acked.
+		{name: "RTO after the SACK", cc: "fixedsim", writes: []int{peerMSS, 9 * peerMSS}, sacks: [][2]int{{100, 1000}}, wantSacked: 9, rto: true},
+		{name: "smaller MSS after an RTO", cc: "fixedsim", writes: []int{peerMSS, 9 * peerMSS}, sacks: [][2]int{{100, 1000}}, wantSacked: 9,
+			rto: true, mss: peerMSS / 2},
+		// A SACK of the head of a GSO segment marks all of it. Recovery
+		// splits off the head and sends the rest again, so only the head
+		// stays in SackedOut.
+		{name: "SACKed head of a GSO segment", cc: "fixedsim", gso: true, writes: []int{100, 300, 100},
+			sacks: [][2]int{{100, 200}, {400, 500}}, wantSacked: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSimPeer(t, tc.cc, tc.gso)
+			end := 0
+			for _, n := range tc.writes {
+				p.clock.Advance(time.Millisecond)
+				p.write(n)
+				p.readAll()
+				end += n
+			}
+			p.clock.Advance(10 * time.Millisecond)
+			p.ack(0, 65535, tc.sacks...)
+			if len(p.readAll()) == 0 {
+				t.Fatal("no repair after the SACK")
+			}
+			sacked := func() (int, tcpip.CongestionControlState) {
+				p.ep.LockUser()
+				defer p.ep.UnlockUser()
+				return p.ep.snd.SackedOut, p.ep.snd.state
+			}
+			if got, state := sacked(); got != tc.wantSacked || state != tcpip.SACKRecovery {
+				t.Errorf("in recovery: SackedOut %d state %v, want %d and SACKRecovery", got, state, tc.wantSacked)
+			}
+			if tc.rto {
+				p.clock.Advance(5 * time.Second)
+				p.readAll()
+			}
+			if tc.mss != 0 {
+				p.ep.LockUser()
+				p.ep.snd.updateMaxPayloadSize(header.TCPMinimumSize+p.ep.maxOptionSize()+tc.mss, 1)
+				p.ep.UnlockUser()
+				p.readAll()
+			}
+			p.ack(end, 65535)
+			p.readAll()
+			if got, _ := sacked(); got != 0 {
+				t.Errorf("after the ACK of all data: SackedOut %d, want 0", got)
 			}
 		})
 	}
