@@ -1480,11 +1480,18 @@ func (s *sender) recordRetransmitTS() {
 	s.retransmitTS = s.ep.tsValNow()
 }
 
+// detectSpuriousRecovery runs the Eifel check of RFC 3522. It returns true for a spurious RTO.
+//
 // +checklocks:s.ep.mu
-func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
+func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) bool {
 	// Return if the sender has already detected spurious recovery.
 	if s.spuriousRecovery {
-		return
+		return false
+	}
+
+	// Eifel needs timestamps. As in Linux tcp_packet_delayed, a TSEcr of 0 is not valid.
+	if !s.ep.SendTSOk || tsEchoReply == 0 {
+		return false
 	}
 
 	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 4
@@ -1492,15 +1499,15 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// If the value of the Timestamp Echo Reply field of the acceptable ACK's
 	// Timestamps option is smaller than the value of RetransmitTS, then
 	// proceed to next step, else return.
-	if tsEchoReply >= s.retransmitTS {
-		return
+	if int32(tsEchoReply-s.retransmitTS) >= 0 {
+		return false
 	}
 
 	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 5
 	//
 	// If the acceptable ACK carries a DSACK option [RFC2883], then return.
 	if hasDSACK {
-		return
+		return false
 	}
 
 	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 5
@@ -1511,7 +1518,7 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// else return.
 	numDSACK := s.ep.stack.Stats().TCP.SegmentsAckedWithDSACK.Value()
 	if numDSACK == 0 && s.SndUna == s.SndNxt {
-		return
+		return false
 	}
 
 	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 6
@@ -1532,7 +1539,45 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// number of timeout recoveries.
 	if s.state == tcpip.RTORecovery {
 		s.ep.stack.Stats().TCP.SpuriousRTORecovery.Increment()
+		return true
 	}
+	return false
+}
+
+// exitRecoveryState sets the Open state after a fast or an RTO recovery.
+//
+// +checklocks:s.ep.mu
+func (s *sender) exitRecoveryState() {
+	if s.state == tcpip.RTORecovery {
+		s.ccsimExitRTO()
+	}
+	s.state = tcpip.Open
+	// Update RACK when we are exiting fast or RTO
+	// recovery as described in the RFC
+	// draft-ietf-tcpm-rack-08 Section-7.2 Step 4.
+	if s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+		s.rc.exitRecovery()
+	}
+	s.reorderTimer.disable()
+}
+
+// undoRTO stops the go-back-N resend after a spurious RTO. As in Linux
+// tcp_undo_cwnd_reduction with unmark_loss, the sent data is in flight again.
+//
+// +checklocks:s.ep.mu
+func (s *sender) undoRTO() {
+	s.Outstanding = 0
+	seg := s.writeList.Front()
+	for ; seg != nil && seg.xmitCount != 0; seg = seg.Next() {
+		seg.lost = false
+		// The ACK of seg decreases Outstanding with the same check.
+		if !s.ep.SACKPermitted || !s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
+			s.Outstanding += s.pCount(seg, s.MaxPayloadSize)
+		}
+	}
+	s.updateWriteNext(seg)
+	s.ccsimUndoRTO()
+	s.firstRetransmittedSegXmitTime = tcpip.MonotonicTime{}
 }
 
 // Check if the sender is in RTORecovery, FastRecovery or SACKRecovery state.
@@ -1727,26 +1772,18 @@ func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 		s.ep.scoreboard.Delete(s.SndUna)
 
 		// Detect if the sender entered recovery spuriously.
-		if s.inRecovery() {
-			s.detectSpuriousRecovery(hasDSACK, rcvdSeg.parsedOptions.TSEcr)
-		}
+		spuriousRTO := s.inRecovery() && s.detectSpuriousRecovery(hasDSACK, rcvdSeg.parsedOptions.TSEcr)
 
 		// If we are not in fast recovery then update the congestion
 		// window based on the number of acknowledged packets.
 		if !s.FastRecovery.Active {
 			s.cc.Update(originalOutstanding-s.Outstanding, bestRTT)
-			if s.FastRecovery.Last.LessThan(s.SndUna) {
-				if s.state == tcpip.RTORecovery {
-					s.ccsimExitRTO()
-				}
-				s.state = tcpip.Open
-				// Update RACK when we are exiting fast or RTO
-				// recovery as described in the RFC
-				// draft-ietf-tcpm-rack-08 Section-7.2 Step 4.
-				if s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
-					s.rc.exitRecovery()
-				}
-				s.reorderTimer.disable()
+			// undoRTO changes Outstanding, so it runs after Update.
+			if spuriousRTO {
+				s.undoRTO()
+			}
+			if spuriousRTO || s.FastRecovery.Last.LessThan(s.SndUna) {
+				s.exitRecoveryState()
 			}
 		}
 

@@ -95,15 +95,32 @@ type simPeer struct {
 	iss     seqnum.Value
 	peerSeq seqnum.Value
 	port    uint16
+	// ts is set when the connection uses timestamps. tsVal is the TSVal of
+	// the peer, and tsRecent is the last TSVal of the endpoint.
+	ts       bool
+	tsVal    uint32
+	tsRecent uint32
 }
 
 type peerPkt struct {
 	seq   seqnum.Value
 	flags header.TCPFlags
 	len   int
+	tsVal uint32
 }
 
 func newSimPeer(t *testing.T, cc string, gso bool) *simPeer {
+	t.Helper()
+	return newSimPeerWith(t, cc, gso, false)
+}
+
+// newSimPeerTS returns a peer that uses timestamps. The MSS is then less than peerMSS.
+func newSimPeerTS(t *testing.T, cc string) *simPeer {
+	t.Helper()
+	return newSimPeerWith(t, cc, false, true)
+}
+
+func newSimPeerWith(t *testing.T, cc string, gso, ts bool) *simPeer {
 	t.Helper()
 	clock := faketime.NewManualClock()
 	stk := stack.New(stack.Options{
@@ -150,29 +167,38 @@ func newSimPeer(t *testing.T, cc string, gso bool) *simPeer {
 			t.Fatalf("connect: %v", err)
 		}
 	}
-	p := &simPeer{t: t, clock: clock, link: link, ep: e.(*Endpoint), peerSeq: 1000}
+	p := &simPeer{t: t, clock: clock, link: link, ep: e.(*Endpoint), peerSeq: 1000, ts: ts, tsVal: 1}
 	syn, port := p.readPort()
 	if syn.flags != header.TCPFlagSyn {
 		t.Fatalf("got flags %v, want SYN", syn.flags)
 	}
 	p.iss, p.port = syn.seq+1, port
-	opts := make([]byte, 8)
+	opts := make([]byte, 20)
 	n := header.EncodeMSSOption(peerOptSize+peerMSS, opts)
 	n += header.EncodeSACKPermittedOption(opts[n:])
 	n += header.EncodeNOP(opts[n:])
 	n += header.EncodeNOP(opts[n:])
+	if ts {
+		n += header.EncodeNOP(opts[n:])
+		n += header.EncodeNOP(opts[n:])
+		n += header.EncodeTSOption(p.tsVal, p.tsRecent, opts[n:])
+	}
 	p.send(header.TCPFlagSyn|header.TCPFlagAck, p.peerSeq, p.iss, 65535, opts[:n])
 	p.peerSeq++
 	if got := p.read(); got.flags != header.TCPFlagAck {
 		t.Fatalf("got flags %v, want ACK", got.flags)
 	}
-	p.ep.LockUser()
-	mss := p.ep.snd.MaxPayloadSize
-	p.ep.UnlockUser()
-	if mss != peerMSS {
+	if mss := p.mss(); !ts && mss != peerMSS {
 		t.Fatalf("sender MSS %d, want %d", mss, peerMSS)
 	}
 	return p
+}
+
+// mss returns the payload size of a full segment of the endpoint.
+func (p *simPeer) mss() int {
+	p.ep.LockUser()
+	defer p.ep.UnlockUser()
+	return p.ep.snd.MaxPayloadSize
 }
 
 // at returns the sequence number of byte off of the endpoint data.
@@ -213,7 +239,12 @@ func (p *simPeer) readTimeout(d time.Duration) (peerPkt, uint16, bool) {
 	v := pkt.ToView()
 	defer v.Release()
 	th := header.TCP(header.IPv4(v.AsSlice()).Payload())
-	return peerPkt{seq: seqnum.Value(th.SequenceNumber()), flags: th.Flags(), len: len(th.Payload())}, th.SourcePort(), true
+	pk := peerPkt{seq: seqnum.Value(th.SequenceNumber()), flags: th.Flags(), len: len(th.Payload())}
+	if opts := header.ParseTCPOptions(th.Options()); opts.TS {
+		pk.tsVal = opts.TSVal
+		p.tsRecent = opts.TSVal
+	}
+	return pk, th.SourcePort(), true
 }
 
 // readAll reads data packets until no packet comes for 100 ms. It skips pure ACKs.
@@ -260,15 +291,27 @@ func (p *simPeer) send(flags header.TCPFlags, seq, ack seqnum.Value, wnd uint16,
 }
 
 // ack sends an ACK of ack bytes with SACK blocks of byte offsets.
+// With timestamps, it echoes the last TSVal of the endpoint.
 func (p *simPeer) ack(ack int, wnd uint16, sacks ...[2]int) {
+	p.ackEcr(ack, wnd, p.tsRecent, sacks...)
+}
+
+// ackEcr is ack with the TSEcr tsEcr. It needs timestamps.
+func (p *simPeer) ackEcr(ack int, wnd uint16, tsEcr uint32, sacks ...[2]int) {
 	blocks := make([]header.SACKBlock, len(sacks))
 	for i, sb := range sacks {
 		blocks[i] = header.SACKBlock{Start: p.at(sb[0]), End: p.at(sb[1])}
 	}
 	opts := make([]byte, 40)
 	n := 0
+	if p.ts {
+		p.tsVal++
+		n += header.EncodeNOP(opts[n:])
+		n += header.EncodeNOP(opts[n:])
+		n += header.EncodeTSOption(p.tsVal, tsEcr, opts[n:])
+	}
 	if len(blocks) > 0 {
-		n = header.EncodeNOP(opts)
+		n += header.EncodeNOP(opts[n:])
 		n += header.EncodeNOP(opts[n:])
 		n += header.EncodeSACKBlocks(blocks, opts[n:])
 	}

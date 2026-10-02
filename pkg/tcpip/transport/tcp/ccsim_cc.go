@@ -1276,6 +1276,27 @@ func (s *sender) ccsimExitRTO() {
 	}
 }
 
+// ccsimUndoRTO puts the sent data back in the RACK queue and pipe after a spurious RTO.
+// ccsimMarkAllLost took it out. lostCum does not change, as Linux tp->lost does not.
+//
+// +checklocks:s.ep.mu
+func (s *sender) ccsimUndoRTO() {
+	if s.ccsim == nil || s.ep.tcpRecovery&tcpip.TCPRACKLossDetection == 0 {
+		return
+	}
+	for seg := s.writeList.Front(); seg != nil && seg.xmitCount != 0; seg = seg.Next() {
+		ss := seg.ccsim
+		if ss == nil || ss.counted || ss.rackPipeCopies != 0 || s.ep.SACKPermitted && s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
+			continue
+		}
+		s.ccsimRACKUnlinkLost(seg)
+		s.ccsimRACKInsertSent(seg)
+		n := s.pCount(seg, s.MaxPayloadSize)
+		ss.rackPipeCopies = n
+		s.ccsim.rackPipe += n
+	}
+}
+
 // ccsimResendAllowed reports whether pacing permits the first retransmission.
 // If not, the pacing timer sends it.
 //
