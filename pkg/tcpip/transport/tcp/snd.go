@@ -109,6 +109,9 @@ type sender struct {
 	// lr is the loss recovery algorithm used by the sender.
 	lr lossRecovery
 
+	// ccsim is the state of a sim congestion control, or nil.
+	ccsim *ccsimSenderState `state:"nosave"`
+
 	// firstRetransmittedSegXmitTime is the original transmit time of
 	// the first segment that was retransmitted due to RTO expiration.
 	firstRetransmittedSegXmitTime tcpip.MonotonicTime
@@ -195,6 +198,8 @@ type sender struct {
 type protectedWriteList struct {
 	writeList segmentList
 	set       map[*segment]struct{}
+	// sackHint is the last segment of a SACK walk. Remove clears it.
+	sackHint *segment `state:"nosave"`
 }
 
 // Front returns the front of the write list.
@@ -214,6 +219,9 @@ func (wl *protectedWriteList) Remove(seg *segment) {
 	}
 	wl.writeList.Remove(seg)
 	delete(wl.set, seg)
+	if wl.sackHint == seg {
+		wl.sackHint = nil
+	}
 }
 
 // PushBack pushes seg onto the back of the write list.
@@ -299,6 +307,7 @@ func initSender(ep *Endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, mss uin
 	// the maxPayloadSize as the smss when determining if a segment is lost
 	// etc.
 	ep.snd.ep.scoreboard = NewSACKScoreboard(uint16(ep.snd.MaxPayloadSize), iss)
+	ep.snd.ccsimSetSACKLimit()
 
 	// Get Stack wide config.
 	var minRTO tcpip.TCPMinRTOOption
@@ -329,6 +338,9 @@ func (s *sender) initCongestionControl(congestionControlName tcpip.CongestionCon
 	s.SndCwnd = InitialCwnd
 	s.Ssthresh = InitialSsthresh
 
+	if cc := s.ccsimInitCC(congestionControlName); cc != nil {
+		return cc
+	}
 	switch congestionControlName {
 	case ccCubic:
 		return newCubicCC(s)
@@ -489,6 +501,9 @@ func (s *sender) updateRTO(rtt time.Duration) {
 // resendSegment resends the first unacknowledged segment.
 // +checklocks:s.ep.mu
 func (s *sender) resendSegment() {
+	if !s.ccsimResendAllowed() {
+		return
+	}
 	// Don't use any segments we already sent to measure RTT as they may
 	// have been affected by packets being lost.
 	s.RTTMeasureSeqNum = s.SndNxt
@@ -506,6 +521,7 @@ func (s *sender) resendSegment() {
 		s.FastRecovery.HighRxt = seg.sequenceNumber.Add(seqnum.Size(seg.payloadSize())) - 1
 		s.FastRecovery.RescueRxt = seg.sequenceNumber.Add(seqnum.Size(seg.payloadSize())) - 1
 		s.sendSegment(seg)
+		s.ccsimOnResend(seg)
 		s.ep.stack.Stats().TCP.FastRetransmit.Increment()
 		s.ep.stats.SendErrors.FastRetransmit.Increment()
 
@@ -698,6 +714,7 @@ func (s *sender) splitSeg(seg *segment, size int) {
 		seg.flags ^= header.TCPFlagPsh
 	}
 	seg.pkt.Data().CapLength(size)
+	s.ccsimSplitSegment(seg, nSeg)
 }
 
 // NextSeg implements the RFC6675 NextSeg() operation.
@@ -1077,12 +1094,13 @@ func (s *sender) sendData() {
 		limit = int(s.ep.gso.MaxSize - header.TCPTotalHeaderMaximumSize - 1)
 	}
 	end := s.SndUna.Add(s.SndWnd)
+	ccsimIdleRestart := s.ccsimMaybeHandleRestartFromIdle()
 
 	// Reduce the congestion window to min(IW, cwnd) per RFC 5681, page 10.
 	// "A TCP SHOULD set cwnd to no more than RW before beginning
 	// transmission if the TCP has not sent data in the interval exceeding
 	// the retrasmission timeout."
-	if !s.FastRecovery.Active && s.state != tcpip.RTORecovery && s.ep.stack.Clock().NowMonotonic().Sub(s.LastSendTime) > s.RTO {
+	if !ccsimIdleRestart && !s.FastRecovery.Active && s.state != tcpip.RTORecovery && s.ep.stack.Clock().NowMonotonic().Sub(s.LastSendTime) > s.RTO {
 		if s.SndCwnd > InitialCwnd {
 			s.SndCwnd = InitialCwnd
 		}
@@ -1101,13 +1119,18 @@ func (s *sender) sendData() {
 			s.updateWriteNext(seg.Next())
 			continue
 		}
+		if !s.ccsimPacingAllows() {
+			break
+		}
 		if sent := s.maybeSendSegment(seg, limit, end); !sent {
 			break
 		}
 		dataSent = true
+		s.ccsimPacingCharge(seg.payloadSize())
 		s.Outstanding += s.pCount(seg, s.MaxPayloadSize)
 		s.updateWriteNext(seg.Next())
 	}
+	s.ccsimMarkAppLimited()
 
 	s.postXmit(dataSent, true /* shouldScheduleProbe */)
 }
@@ -1128,6 +1151,7 @@ func (s *sender) enterRecovery() {
 	// We inflate the cwnd by 3 to account for the 3 packets which triggered
 	// the 3 duplicate ACKs and are now not in flight.
 	s.SndCwnd = s.Ssthresh + 3
+	s.ccsimEnterRecovery()
 	s.SackedOut = 0
 	s.DupAckCount = 0
 	s.FastRecovery.First = s.SndUna
@@ -1159,6 +1183,7 @@ func (s *sender) enterRecovery() {
 // +checklocks:s.ep.mu
 func (s *sender) leaveRecovery() {
 	s.FastRecovery.Active = false
+	s.ccsimLeaveRecovery()
 	s.FastRecovery.MaxCwnd = 0
 	s.DupAckCount = 0
 
@@ -1185,6 +1210,10 @@ func (s *sender) SetPipe() {
 	// If SACK isn't permitted or it is permitted but recovery is not active
 	// then ignore pipe calculations.
 	if !s.ep.SACKPermitted || !s.FastRecovery.Active {
+		return
+	}
+	if s.ccsim != nil {
+		s.Outstanding = s.ccsimSetPipe()
 		return
 	}
 	pipe := 0
@@ -1354,6 +1383,10 @@ func (s *sender) walkSACK(rcvdSeg *segment) bool {
 	if n == 0 {
 		return hasDSACK
 	}
+	if s.ccsim != nil {
+		s.ccsimWalkSACK(rcvdSeg)
+		return hasDSACK
+	}
 
 	// Sort the SACK blocks. The first block is the most recent unacked
 	// block. The following blocks can be in arbitrary order.
@@ -1492,6 +1525,7 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// between fast, SACK or RTO recovery.
 	s.spuriousRecovery = true
 	s.ep.stack.Stats().TCP.SpuriousRecovery.Increment()
+	s.ccsimUndoRecovery()
 
 	// RFC 3522 will detect all kinds of spurious recoveries (fast, SACK and
 	// timeout). Increment the metric for RTO only as we want to track the
@@ -1509,10 +1543,10 @@ func (s *sender) inRecovery() bool {
 	return false
 }
 
-// handleRcvdSegment is called when a segment is received; it is responsible for
+// handleRcvdSegmentInner is called when a segment is received; it is responsible for
 // updating the send-related state.
 // +checklocks:s.ep.mu
-func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
+func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 	bestRTT := unknownRTT
 
 	// Check if we can extract an RTT measurement from this ack.
@@ -1702,6 +1736,9 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 		if !s.FastRecovery.Active {
 			s.cc.Update(originalOutstanding-s.Outstanding, bestRTT)
 			if s.FastRecovery.Last.LessThan(s.SndUna) {
+				if s.state == tcpip.RTORecovery {
+					s.ccsimExitRTO()
+				}
 				s.state = tcpip.Open
 				// Update RACK when we are exiting fast or RTO
 				// recovery as described in the RFC
@@ -1733,6 +1770,7 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 			s.firstRetransmittedSegXmitTime = tcpip.MonotonicTime{}
 			s.resendTimer.disable()
 			s.probeTimer.disable()
+			s.ccsimDropTLPProbe()
 		}
 	}
 
@@ -1755,10 +1793,12 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 			fastRetransmit = true
 		}
 
+		s.ccsimOnAck(rcvdSeg)
 		if s.FastRecovery.Active {
 			s.rc.DoRecovery(nil, fastRetransmit)
 		}
 	}
+	s.ccsimOnAck(rcvdSeg)
 
 	// Now that we've popped all acknowledged data from the retransmit
 	// queue, retransmit if needed.
@@ -1790,6 +1830,7 @@ func (s *sender) sendSegment(seg *segment) tcpip.Error {
 		}
 	}
 	seg.xmitTime = s.ep.stack.Clock().NowMonotonic()
+	s.ccsimOnTransmit(seg)
 	seg.xmitCount++
 	seg.lost = false
 

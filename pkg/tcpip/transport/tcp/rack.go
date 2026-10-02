@@ -193,6 +193,12 @@ func (s *sender) probeTimerExpired() tcpip.Error {
 	if s.probeTimer.isUninitialized() || !s.probeTimer.checkExpiration() {
 		return nil
 	}
+	// ccsimSendTLPProbe is a copy of the body below, with pacing. Change both.
+	if s.ccsim != nil {
+		s.ccsim.tlpProbePending = true
+		s.ccsimSendTLPProbe()
+		return nil
+	}
 
 	var dataSent bool
 	if s.writeNext != nil && s.writeNext.xmitCount == 0 && s.Outstanding < s.SndCwnd {
@@ -268,6 +274,7 @@ func (s *sender) detectTLPRecovery(ack seqnum.Value, rcvdSeg *segment) {
 			// form of a probe) was lost. Invoke a congestion control response
 			// equivalent to fast recovery.
 			s.cc.HandleLossDetected()
+			s.ccsimHandleLossProbeRecovery()
 			s.enterRecovery()
 			s.leaveRecovery()
 		}
@@ -361,6 +368,9 @@ func (rc *rackControl) exitRecovery() {
 //
 // +checklocks:rc.snd.ep.mu
 func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
+	if rc.snd.ccsim != nil {
+		return rc.snd.ccsimDetectLoss(rcvTime)
+	}
 	var timeout time.Duration
 	numLost := 0
 	for seg := rc.snd.writeList.Front(); seg != nil && seg.xmitCount != 0; seg = seg.Next() {
@@ -421,6 +431,10 @@ func (rc *rackControl) reorderTimerExpired() tcpip.Error {
 // +checklocks:rc.snd.ep.mu
 func (rc *rackControl) DoRecovery(_ *segment, fastRetransmit bool) {
 	snd := rc.snd
+	if snd.ccsim != nil {
+		snd.ccsimDoRecovery(fastRetransmit)
+		return
+	}
 	if fastRetransmit {
 		snd.resendSegment()
 	}

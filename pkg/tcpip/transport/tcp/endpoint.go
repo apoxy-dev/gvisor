@@ -1028,6 +1028,7 @@ func (e *Endpoint) purgeWriteQueue() {
 		e.sndQueueInfo.sndQueueMu.Lock()
 		defer e.sndQueueInfo.sndQueueMu.Unlock()
 		e.snd.updateWriteNext(nil)
+		e.snd.ccsimPurge()
 		for s := e.snd.writeList.Front(); s != nil; s = e.snd.writeList.Front() {
 			e.snd.writeList.Remove(s)
 			s.DecRef()
@@ -1195,6 +1196,7 @@ func (e *Endpoint) cleanupLocked() {
 		e.snd.probeTimer.cleanup()
 		e.snd.reorderTimer.cleanup()
 		e.snd.corkTimer.cleanup()
+		e.snd.ccsimCleanup()
 	}
 
 	if e.finWait2Timer != nil {
@@ -2004,7 +2006,7 @@ func (e *Endpoint) SetSockOpt(opt tcpip.SettableSocketOption) tcpip.Error {
 				switch state {
 				case StateEstablished:
 					if e.EndpointState() == state {
-						e.snd.cc = e.snd.initCongestionControl(e.cc)
+						e.snd.ccsimSwitchCC(e.cc)
 					}
 				}
 				e.UnlockUser()

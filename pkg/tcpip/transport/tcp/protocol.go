@@ -582,7 +582,7 @@ func newProtocol(s *stack.Stack, cc string, probe TCPProbeFunc) stack.TransportP
 		},
 		sackEnabled:                true,
 		congestionControl:          cc,
-		availableCongestionControl: []string{ccReno, ccCubic},
+		availableCongestionControl: append([]string{ccReno, ccCubic}, simRegisteredCCNames()...),
 		moderateReceiveBuffer:      true,
 		lingerTimeout:              DefaultTCPLingerTimeout,
 		timeWaitTimeout:            DefaultTCPTimeWaitTimeout,

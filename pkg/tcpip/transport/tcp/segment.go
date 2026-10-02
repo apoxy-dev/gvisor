@@ -75,6 +75,8 @@ type segment struct {
 	options        []byte `state:".([]byte)"`
 	hasNewSACKInfo bool
 	rcvdTime       tcpip.MonotonicTime
+	// ccsim is the rate and RACK state for a sim congestion control, or nil.
+	ccsim *ccsimSegState `state:"nosave"`
 	// xmitTime is the last transmit time of this segment.
 	xmitTime  tcpip.MonotonicTime
 	xmitCount uint32
@@ -209,6 +211,7 @@ func (s *segment) DecRef() {
 		}
 		s.pkt.DecRef()
 		s.pkt = nil
+		s.ccsimFree()
 		segmentPool.Put(s)
 	})
 }

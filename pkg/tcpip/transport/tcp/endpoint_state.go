@@ -39,6 +39,14 @@ func logDisconnect() {
 
 // beforeSave is invoked by stateify.
 func (e *Endpoint) beforeSave() {
+	// The ccsim state is not saved, so an endpoint with a sim congestion control cannot be saved.
+	e.mu.Lock()
+	simCC := e.snd != nil && e.snd.ccsim != nil
+	e.mu.Unlock()
+	if simCC {
+		panic("cannot save a TCP endpoint that uses a sim congestion control")
+	}
+
 	// Stop incoming packets.
 	e.segmentQueue.freeze()
 

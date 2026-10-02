@@ -44,6 +44,9 @@ func (sr *sackRecovery) handleSACKRecovery(limit int, end seqnum.Value) (dataSen
 
 	nextSegHint := snd.writeList.Front()
 	for snd.Outstanding < snd.SndCwnd {
+		if !snd.ccsimPacingAllows() {
+			return dataSent
+		}
 		var nextSeg *segment
 		var rescueRtx bool
 		nextSeg, nextSegHint, rescueRtx = snd.NextSeg(nextSegHint)
@@ -68,6 +71,7 @@ func (sr *sackRecovery) handleSACKRecovery(limit int, end seqnum.Value) (dataSen
 				return dataSent
 			}
 			dataSent = true
+			snd.ccsimPacingCharge(nextSeg.payloadSize())
 			snd.Outstanding++
 			snd.updateWriteNext(nextSeg.Next())
 			continue
@@ -83,6 +87,7 @@ func (sr *sackRecovery) handleSACKRecovery(limit int, end seqnum.Value) (dataSen
 		snd.Outstanding++
 		dataSent = true
 		snd.sendSegment(nextSeg)
+		snd.ccsimPacingCharge(nextSeg.payloadSize())
 
 		segEnd := nextSeg.sequenceNumber.Add(nextSeg.logicalLen())
 		if rescueRtx {

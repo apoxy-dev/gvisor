@@ -216,6 +216,7 @@ func handleConnected(ep *Endpoint) {
 //
 // +checklocks:ep.mu
 func startTimeWait(ep *Endpoint) {
+	ep.snd.ccsimCleanup()
 	// Disable close timer as we are now entering real TIME_WAIT.
 	if ep.finWait2Timer != nil {
 		ep.finWait2Timer.Stop()

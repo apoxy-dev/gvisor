@@ -29,6 +29,10 @@ const (
 	// insertions will fail.
 	maxSACKBlocks = 100
 
+	// ccsimMaxSACKBlocks is the limit with a sim congestion control.
+	// 100 blocks cause false RACK losses at a high BDP.
+	ccsimMaxSACKBlocks = 4096
+
 	// defaultBtreeDegree is set to 2 as btree.New(2) results in a 2-3-4
 	// tree.
 	defaultBtreeDegree = 2
@@ -55,6 +59,8 @@ type SACKScoreboard struct {
 	maxSACKED seqnum.Value
 	sacked    seqnum.Size                     `state:"nosave"`
 	ranges    *btree.BTreeG[header.SACKBlock] `state:"nosave"`
+	// ccsimBlocks is set for a sim congestion control. The limit is then ccsimMaxSACKBlocks.
+	ccsimBlocks bool `state:"nosave"`
 }
 
 // NewSACKScoreboard returns a new SACK Scoreboard.
@@ -74,7 +80,11 @@ func (s *SACKScoreboard) Reset() {
 
 // Insert inserts/merges the provided SACKBlock into the scoreboard.
 func (s *SACKScoreboard) Insert(r header.SACKBlock) {
-	if s.ranges.Len() >= maxSACKBlocks {
+	limit := maxSACKBlocks
+	if s.ccsimBlocks {
+		limit = ccsimMaxSACKBlocks
+	}
+	if s.ranges.Len() >= limit {
 		return
 	}
 
