@@ -1663,8 +1663,9 @@ func (s *sender) handleRcvdSegmentInner(rcvdSeg *segment) {
 		if (ack-1).InRange(s.SndUna, s.SndNxt) && s.FastRecovery.Last.LessThan(ack) {
 			s.leaveRecovery()
 		}
-	} else {
-		// Detect loss by counting the duplicates and enter recovery.
+	} else if s.state != tcpip.RTORecovery {
+		// Detect loss by counting the duplicates and enter recovery. In RTO
+		// recovery, duplicate ACKs do not change the state (Linux Loss state).
 		fastRetransmit = s.detectLoss(rcvdSeg)
 	}
 
