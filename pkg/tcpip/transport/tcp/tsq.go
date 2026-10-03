@@ -32,7 +32,8 @@ const (
 // stack.CapabilityTxNotify, as TCP small queues in Linux.
 type tsq struct {
 	ep *Endpoint
-	// queued is the number of packets in the link queue.
+	// queued is the number of packets in the link queue. A GSO packet counts
+	// as its segments.
 	queued atomicbitops.Int32
 	// wake is the queued count at which TxDequeued continues the sends.
 	wake atomicbitops.Int32
@@ -43,12 +44,12 @@ type tsq struct {
 }
 
 // TxQueued implements stack.TxNotifier.
-func (q *tsq) TxQueued() { q.queued.Add(1) }
+func (q *tsq) TxQueued(n int) { q.queued.Add(int32(n)) }
 
 // TxDequeued implements stack.TxNotifier. It runs on the reader of the link
 // queue and takes no endpoint lock.
-func (q *tsq) TxDequeued() {
-	if q.queued.Add(-1) > q.wake.Load() || !q.throttled.CompareAndSwap(true, false) {
+func (q *tsq) TxDequeued(n int) {
+	if q.queued.Add(-int32(n)) > q.wake.Load() || !q.throttled.CompareAndSwap(true, false) {
 		return
 	}
 	e := q.ep

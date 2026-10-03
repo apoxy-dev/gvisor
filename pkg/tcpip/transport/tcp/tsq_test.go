@@ -15,6 +15,7 @@
 package tcp
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -225,5 +226,45 @@ func TestTSQTwoEndpoints(t *testing.T) {
 	}
 	if got := noBufferSpace(stk); got != 0 {
 		t.Errorf("TxPacketsDroppedNoBufferSpace = %d, want 0", got)
+	}
+}
+
+// TestTSQGSO checks the limit on a link with GSO, where a packet counts as
+// its segments of the MSS.
+func TestTSQGSO(t *testing.T) {
+	for _, read := range []bool{false, true} {
+		t.Run(fmt.Sprintf("read=%t", read), func(t *testing.T) {
+			stk, link, clock := newTSQStack(t, "tsqsim", true)
+			link.SupportedGSOKind = stack.HostGSOSupported
+			p := connectTSQ(t, stk, link, clock)
+			mss := p.mss()
+			limit := tsqMinBytes / mss
+			// A send that starts below the limit can add one GSO packet.
+			most := limit + (int(link.GSOMaxSize())+mss-1)/mss
+			queued := func() int { return int(p.ep.tsq.queued.Load()) }
+			p.write(tsqCwnd * mss)
+			if !read {
+				if got := queued(); got < limit || got >= most {
+					t.Errorf("link queue has %d segments, want %d to %d", got, limit, most-1)
+				}
+				if got := link.NumQueued(); got >= limit {
+					t.Errorf("link queue has %d packets, want fewer than %d with GSO", got, limit)
+				}
+			} else {
+				// cwnd counts the short last segment of a GSO packet as a
+				// full MSS, so read half of cwnd. That is more than two limits.
+				maxQueued := 0
+				for sent := 0; sent < tsqCwnd/2*mss; {
+					maxQueued = max(maxQueued, queued())
+					sent += p.read().len
+				}
+				if maxQueued >= most {
+					t.Errorf("link queue had %d segments, want fewer than %d", maxQueued, most)
+				}
+			}
+			if got := noBufferSpace(stk); got != 0 {
+				t.Errorf("TxPacketsDroppedNoBufferSpace = %d, want 0", got)
+			}
+		})
 	}
 }

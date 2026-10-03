@@ -92,11 +92,11 @@ func TestNICCountsFullQueue(t *testing.T) {
 	}
 }
 
-// txCounter counts the TxNotify calls for the packets of one sender.
+// txCounter counts the packets of one sender that TxNotify gets.
 type txCounter struct{ queued, dequeued int }
 
-func (c *txCounter) TxQueued()   { c.queued++ }
-func (c *txCounter) TxDequeued() { c.dequeued++ }
+func (c *txCounter) TxQueued(n int)   { c.queued += n }
+func (c *txCounter) TxDequeued(n int) { c.dequeued += n }
 
 // TestTxNotify writes packets with a TxNotify to an endpoint with a queue of
 // 2, and then takes the packets out of the queue.
@@ -125,8 +125,11 @@ func TestTxNotify(t *testing.T) {
 		write   int  // Packets with a TxNotify.
 		senders int  // Packet i has the TxNotify of sender i%senders.
 		clone   bool // Also write a clone of each packet, which has no TxNotify.
+		// Each packet has payload bytes, and GSO with mss when mss is set.
+		payload int
+		mss     uint16
 		take    func(*testing.T, *Endpoint)
-		// The calls for each sender after the writes, and after take.
+		// The packets of each sender after the writes, and after take.
 		wantQueued, wantDequeuedAtWrite, wantDequeued int
 	}{
 		{name: "read", write: 2, senders: 1, take: read, wantQueued: 2, wantDequeued: 2},
@@ -136,6 +139,11 @@ func TestTxNotify(t *testing.T) {
 		{name: "queue full", write: 3, senders: 1, take: read, wantQueued: 3, wantDequeuedAtWrite: 1, wantDequeued: 3},
 		{name: "cloned packet", write: 1, senders: 1, clone: true, take: read, wantQueued: 1, wantDequeued: 1},
 		{name: "two senders", write: 2, senders: 2, take: read, wantQueued: 1, wantDequeued: 1},
+		{name: "GSO", write: 2, senders: 1, payload: 4500, mss: 1000, take: read, wantQueued: 10, wantDequeued: 10},
+		{name: "GSO queue full", write: 3, senders: 1, payload: 4500, mss: 1000, take: read, wantQueued: 15, wantDequeuedAtWrite: 5, wantDequeued: 15},
+		{name: "GSO one segment", write: 1, senders: 1, payload: 1000, mss: 1000, take: read, wantQueued: 1, wantDequeued: 1},
+		{name: "GSO no payload", write: 1, senders: 1, mss: 1000, take: read, wantQueued: 1, wantDequeued: 1},
+		{name: "no GSO", write: 1, senders: 1, payload: 4500, take: read, wantQueued: 1, wantDequeued: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +157,10 @@ func TestTxNotify(t *testing.T) {
 				pkts.DecRef()
 			}
 			for i := range tc.write {
-				p := stack.NewPacketBuffer(stack.PacketBufferOptions{})
+				p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(make([]byte, tc.payload))})
+				if tc.mss != 0 {
+					p.GSOOptions = stack.GSO{Type: stack.GSOTCPv4, MSS: tc.mss}
+				}
 				p.TxNotify = &c[i%tc.senders]
 				if tc.clone {
 					clone := p.Clone()
@@ -162,13 +173,13 @@ func TestTxNotify(t *testing.T) {
 			}
 			for i, c := range c {
 				if c.queued != tc.wantQueued || c.dequeued != tc.wantDequeuedAtWrite {
-					t.Errorf("sender %d after the writes: TxQueued %d, TxDequeued %d calls, want %d, %d", i, c.queued, c.dequeued, tc.wantQueued, tc.wantDequeuedAtWrite)
+					t.Errorf("sender %d after the writes: TxQueued %d, TxDequeued %d packets, want %d, %d", i, c.queued, c.dequeued, tc.wantQueued, tc.wantDequeuedAtWrite)
 				}
 			}
 			tc.take(t, ep)
 			for i, c := range c {
 				if c.queued != tc.wantQueued || c.dequeued != tc.wantDequeued {
-					t.Errorf("sender %d after take: TxQueued %d, TxDequeued %d calls, want %d, %d", i, c.queued, c.dequeued, tc.wantQueued, tc.wantDequeued)
+					t.Errorf("sender %d after take: TxQueued %d, TxDequeued %d packets, want %d, %d", i, c.queued, c.dequeued, tc.wantQueued, tc.wantDequeued)
 				}
 			}
 		})

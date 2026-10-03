@@ -173,11 +173,19 @@ type PacketBuffer struct {
 }
 
 // TxNotifier counts the packets of a sender in the queue of a link endpoint.
+// A GSO packet counts as the packets that it becomes.
 type TxNotifier interface {
-	// TxQueued is called when the link endpoint puts the packet in its queue.
-	TxQueued()
-	// TxDequeued is called when the packet leaves the queue.
-	TxDequeued()
+	// TxQueued is called when the link endpoint puts n packets in its queue.
+	TxQueued(n int)
+	// TxDequeued is called when n packets leave the queue.
+	TxDequeued(n int)
+}
+
+// NotifyTxQueued calls TxNotify.TxQueued.
+func (pk *PacketBuffer) NotifyTxQueued() {
+	if n := pk.TxNotify; n != nil {
+		n.TxQueued(pk.txPackets())
+	}
 }
 
 // NotifyTxDequeued calls TxNotify.TxDequeued and clears TxNotify, so that a
@@ -185,8 +193,18 @@ type TxNotifier interface {
 func (pk *PacketBuffer) NotifyTxDequeued() {
 	if n := pk.TxNotify; n != nil {
 		pk.TxNotify = nil
-		n.TxDequeued()
+		n.TxDequeued(pk.txPackets())
 	}
+}
+
+// txPackets returns the number of packets that the link sends for pk: the
+// segments of the MSS for a GSO packet, else 1.
+func (pk *PacketBuffer) txPackets() int {
+	mss := int(pk.GSOOptions.MSS)
+	if pk.GSOOptions.Type == GSONone || mss == 0 {
+		return 1
+	}
+	return max(1, (pk.Data().Size()+mss-1)/mss)
 }
 
 // NewPacketBuffer creates a new PacketBuffer with opts.

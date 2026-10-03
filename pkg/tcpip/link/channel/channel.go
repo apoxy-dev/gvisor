@@ -97,7 +97,7 @@ func (q *queue) Write(pkt *stack.PacketBuffer) tcpip.Error {
 		// Count p before a reader can take it. The read of p calls the
 		// same TxNotify, so it lowers this count.
 		p.TxNotify = n
-		n.TxQueued()
+		p.NotifyTxQueued()
 	}
 	select {
 	case q.c <- p:

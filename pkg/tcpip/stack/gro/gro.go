@@ -430,34 +430,37 @@ func (gd *GRO) dispatch6(pkt *stack.PacketBuffer) {
 	// Getting the IP header (+ extension headers) size is a bit of a pain
 	// on IPv6.
 	transProto := tcpip.TransportProtocolNumber(ipHdr.NextHeader())
-	buf := pkt.Data().ToBuffer()
-	buf.TrimFront(header.IPv6MinimumSize)
-	it := header.MakeIPv6PayloadIterator(header.IPv6ExtensionHeaderIdentifier(transProto), buf)
 	ipHdrSize := int(header.IPv6MinimumSize)
-	for {
-		transProto = tcpip.TransportProtocolNumber(it.NextHeaderIdentifier())
-		extHdr, done, err := it.Next()
-		if err != nil {
-			gd.handlePacket(pkt)
-			return
-		}
-		if done {
-			break
-		}
-		switch extHdr.(type) {
-		// We can GRO these, so just skip over them.
-		case header.IPv6HopByHopOptionsExtHdr:
-		case header.IPv6RoutingExtHdr:
-		case header.IPv6DestinationOptionsExtHdr:
-		case header.IPv6ExperimentExtHdr:
-		default:
-			// This is either a TCP header or something we can't handle.
-			ipHdrSize = int(it.HeaderOffset())
-			done = true
-		}
-		extHdr.Release()
-		if done {
-			break
+	// A TCP header after the fixed header needs no iterator, which allocates.
+	if transProto != header.TCPProtocolNumber {
+		buf := pkt.Data().ToBuffer()
+		buf.TrimFront(header.IPv6MinimumSize)
+		it := header.MakeIPv6PayloadIterator(header.IPv6ExtensionHeaderIdentifier(transProto), buf)
+		for {
+			transProto = tcpip.TransportProtocolNumber(it.NextHeaderIdentifier())
+			extHdr, done, err := it.Next()
+			if err != nil {
+				gd.handlePacket(pkt)
+				return
+			}
+			if done {
+				break
+			}
+			switch extHdr.(type) {
+			// We can GRO these, so just skip over them.
+			case header.IPv6HopByHopOptionsExtHdr:
+			case header.IPv6RoutingExtHdr:
+			case header.IPv6DestinationOptionsExtHdr:
+			case header.IPv6ExperimentExtHdr:
+			default:
+				// This is either a TCP header or something we can't handle.
+				ipHdrSize = int(it.HeaderOffset())
+				done = true
+			}
+			extHdr.Release()
+			if done {
+				break
+			}
 		}
 	}
 
