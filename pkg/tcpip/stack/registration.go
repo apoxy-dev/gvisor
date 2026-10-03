@@ -1143,6 +1143,10 @@ const (
 	CapabilityResolutionRequired
 	CapabilitySaveRestore
 	CapabilityLoopback
+	// CapabilityTxNotify indicates that the link endpoint tells the
+	// PacketBuffer.TxNotify of a packet when it queues the packet and when
+	// the packet leaves the queue.
+	CapabilityTxNotify
 )
 
 // LinkWriter is an interface that supports sending packets via a data-link

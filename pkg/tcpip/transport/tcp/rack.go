@@ -465,7 +465,7 @@ func (rc *rackControl) DoRecovery(_ *segment, fastRetransmit bool) {
 		}
 
 		// Check the congestion window after entering recovery.
-		if snd.Outstanding >= snd.SndCwnd {
+		if snd.Outstanding >= snd.SndCwnd || !snd.tsqAllows() {
 			break
 		}
 

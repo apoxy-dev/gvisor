@@ -400,6 +400,9 @@ type Endpoint struct {
 	mu          sync.CrossGoroutineMutex `state:"nosave"`
 	ownedByUser atomicbitops.Uint32
 
+	// tsq counts the packets of the endpoint in the link queue.
+	tsq tsq `state:"nosave"`
+
 	// rcvQueue is the queue for ready-for-delivery segments.
 	//
 	// +checklocks:mu
@@ -714,7 +717,7 @@ func (e *Endpoint) UnlockUser() {
 	// segments can be queued between the time we check if queue is empty
 	// and actually unlock the endpoint mutex.
 	e.segmentQueue.mu.Lock()
-	if e.segmentQueue.emptyLocked() {
+	if e.segmentQueue.emptyLocked() && !e.tsq.resume.Load() {
 		if e.ownedByUser.Swap(0) != 1 {
 			panic("e.UnlockUser() called without calling e.LockUser()")
 		}
@@ -881,6 +884,7 @@ func newEndpoint(s *stack.Stack, protocol *protocol, netProto tcpip.NetworkProto
 		maxSynRetries: DefaultSynRetries,
 		limRdr:        &io.LimitedReader{},
 	}
+	e.tsq.ep = e
 	e.ops.InitHandler(e, e.stack, GetTCPSendBufferLimits, GetTCPReceiveBufferLimits)
 	e.ops.SetMulticastLoop(true)
 	e.ops.SetQuickAck(true)

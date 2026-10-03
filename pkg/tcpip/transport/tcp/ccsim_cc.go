@@ -272,9 +272,11 @@ type ccsimSenderState struct {
 		deliveredCE   int64
 	}
 
-	// recoveryResendPending is set when pacing stopped the first fast retransmit.
+	// recoveryResendPending is set when pacing or the link queue limit stopped
+	// the first fast retransmit.
 	recoveryResendPending bool
-	// tlpProbePending is set when pacing stopped a tail-loss probe.
+	// tlpProbePending is set when pacing or the link queue limit stopped a
+	// tail-loss probe.
 	tlpProbePending bool
 	// tlpOrigAppLimited is the app-limited state of the original tail segment.
 	tlpOrigAppLimited bool
@@ -1304,15 +1306,15 @@ func (s *sender) ccsimUndoRTO() {
 	}
 }
 
-// ccsimResendAllowed reports whether pacing permits the first retransmission.
-// If not, the pacing timer sends it.
+// ccsimResendAllowed reports whether pacing and the link queue limit permit the
+// first retransmission. If not, resumeXmit sends it.
 //
 // +checklocks:s.ep.mu
 func (s *sender) ccsimResendAllowed() bool {
 	if s.ccsim == nil {
 		return true
 	}
-	s.ccsim.recoveryResendPending = !s.ccsimPacingAllows()
+	s.ccsim.recoveryResendPending = !s.xmitAllows()
 	return !s.ccsim.recoveryResendPending
 }
 
@@ -1403,8 +1405,8 @@ func (s *sender) ccsimDoRecovery(fastRetransmit bool) {
 			}
 			limit = min(limit, n)
 		}
-		// A later ACK or the pacing timer continues the walk.
-		if s.Outstanding >= s.SndCwnd || !s.ccsimPacingAllows() {
+		// A later ACK, the pacing timer or a wake from the link continues the walk.
+		if s.Outstanding >= s.SndCwnd || !s.xmitAllows() {
 			break
 		}
 		if !s.maybeSendSegment(seg, limit, s.SndUna.Add(s.SndWnd)) {
@@ -1469,7 +1471,7 @@ func (s *sender) ccsimFindRange(seq seqnum.Value, before bool) (header.SACKBlock
 func (s *sender) ccsimSendTLPProbe() {
 	var dataSent bool
 	if s.writeNext != nil && s.writeNext.xmitCount == 0 && s.Outstanding < s.SndCwnd {
-		if !s.ccsimPacingAllows() {
+		if !s.xmitAllows() {
 			return
 		}
 		dataSent = s.maybeSendSegment(s.writeNext, int(s.ep.scoreboard.SMSS()), s.SndUna.Add(s.SndWnd))
@@ -1493,7 +1495,7 @@ func (s *sender) ccsimSendTLPProbe() {
 		}
 
 		if highestSeqXmit != nil {
-			if !s.ccsimPacingAllows() {
+			if !s.xmitAllows() {
 				return
 			}
 			origAppLimited := highestSeqXmit.ccsim != nil && highestSeqXmit.ccsim.appLimited
@@ -1527,30 +1529,7 @@ func (s *sender) ccsimPacingTimerExpired(st *ccsimSenderState) tcpip.Error {
 	if s.ccsim != st || st.pacingTimer.isUninitialized() || !st.pacingTimer.checkExpiration() {
 		return nil
 	}
-	if st.tlpProbePending {
-		s.ccsimSendTLPProbe()
-		return nil
-	}
-	if s.FastRecovery.Active {
-		if s.ep.SACKPermitted && s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
-			// Send the RACK repairs first. sendData then sends new data.
-			s.rc.DoRecovery(nil, false /* fastRetransmit */)
-		} else {
-			if st.recoveryResendPending {
-				s.resendSegment()
-				if st.recoveryResendPending {
-					return nil
-				}
-			}
-			if sr, ok := s.lr.(*sackRecovery); ok && s.ep.SACKPermitted {
-				// sr.s is s, so s.ep.mu is held.
-				dataSent := sr.handleSACKRecovery(s.MaxPayloadSize, s.SndUna.Add(s.SndWnd)) // +checklocksignore
-				s.postXmit(dataSent, true /* shouldScheduleProbe */)
-				return nil
-			}
-		}
-	}
-	s.sendData()
+	s.resumeXmit()
 	return nil
 }
 

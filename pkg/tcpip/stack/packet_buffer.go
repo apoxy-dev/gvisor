@@ -166,6 +166,27 @@ type PacketBuffer struct {
 	// onRelease is a function to be run when the packet buffer is no longer
 	// referenced (released back to the pool).
 	onRelease func() `state:"nosave"`
+
+	// TxNotify is told when a link endpoint queues the packet and when the
+	// packet leaves the queue. The sender sets it. Clone does not copy it.
+	TxNotify TxNotifier `state:"nosave"`
+}
+
+// TxNotifier counts the packets of a sender in the queue of a link endpoint.
+type TxNotifier interface {
+	// TxQueued is called when the link endpoint puts the packet in its queue.
+	TxQueued()
+	// TxDequeued is called when the packet leaves the queue.
+	TxDequeued()
+}
+
+// NotifyTxDequeued calls TxNotify.TxDequeued and clears TxNotify, so that a
+// packet calls it at most once.
+func (pk *PacketBuffer) NotifyTxDequeued() {
+	if n := pk.TxNotify; n != nil {
+		pk.TxNotify = nil
+		n.TxDequeued()
+	}
 }
 
 // NewPacketBuffer creates a new PacketBuffer with opts.

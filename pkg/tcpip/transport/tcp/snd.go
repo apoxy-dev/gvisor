@@ -1145,7 +1145,7 @@ func (s *sender) sendData() {
 			s.updateWriteNext(seg.Next())
 			continue
 		}
-		if !s.ccsimPacingAllows() {
+		if !s.xmitAllows() {
 			break
 		}
 		if sent := s.maybeSendSegment(seg, limit, end); !sent {

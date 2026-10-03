@@ -62,6 +62,9 @@ func (q *queue) Close() {
 func (q *queue) Read() *stack.PacketBuffer {
 	select {
 	case p := <-q.c:
+		if p != nil {
+			p.NotifyTxDequeued()
+		}
 		return p
 	default:
 		return nil
@@ -71,6 +74,9 @@ func (q *queue) Read() *stack.PacketBuffer {
 func (q *queue) ReadContext(ctx context.Context) *stack.PacketBuffer {
 	select {
 	case pkt := <-q.c:
+		if pkt != nil {
+			pkt.NotifyTxDequeued()
+		}
 		return pkt
 	case <-ctx.Done():
 		return nil
@@ -87,10 +93,17 @@ func (q *queue) Write(pkt *stack.PacketBuffer) tcpip.Error {
 
 	wrote := false
 	p := pkt.Clone()
+	if n := pkt.TxNotify; n != nil {
+		// Count p before a reader can take it. The read of p calls the
+		// same TxNotify, so it lowers this count.
+		p.TxNotify = n
+		n.TxQueued()
+	}
 	select {
 	case q.c <- p:
 		wrote = true
 	default:
+		p.NotifyTxDequeued()
 		p.DecRef()
 	}
 	notify := q.notify
@@ -275,11 +288,14 @@ func (e *Endpoint) SetLinkAddress(addr tcpip.LinkAddress) {
 
 // WritePackets stores outbound packets into the channel.
 // Multiple concurrent calls are permitted.
+//
+// When the queue is full before the first packet, it returns
+// ErrNoBufferSpace, so that the NIC counts the drop.
 func (e *Endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	n := 0
 	for _, pkt := range pkts.AsSlice() {
 		if err := e.q.Write(pkt); err != nil {
-			if _, ok := err.(*tcpip.ErrNoBufferSpace); !ok && n == 0 {
+			if n == 0 {
 				return 0, err
 			}
 			break

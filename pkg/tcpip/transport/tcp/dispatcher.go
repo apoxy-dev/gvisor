@@ -192,6 +192,17 @@ func handleConnected(ep *Endpoint) {
 		return
 	}
 
+	// The link queue has room again.
+	if ep.tsq.resume.Swap(false) {
+		if ep.EndpointState() != StateTimeWait {
+			ep.snd.resumeXmit()
+		}
+		if ep.segmentQueue.empty() {
+			ep.mu.Unlock()
+			return
+		}
+	}
+
 	// NOTE: We read this outside of e.mu lock which means that by the time
 	// we get to handleSegments the endpoint may not be in ESTABLISHED. But
 	// this should be fine as all normal shutdown states are handled by
@@ -314,7 +325,7 @@ func (p *processor) start(wg *sync.WaitGroup) {
 				if ep == nil {
 					break
 				}
-				if ep.segmentQueue.empty() {
+				if ep.segmentQueue.empty() && !ep.tsqResumePending() {
 					continue
 				}
 				switch state := ep.EndpointState(); {
@@ -341,7 +352,7 @@ func (p *processor) start(wg *sync.WaitGroup) {
 				// If there are more segments to process and the
 				// endpoint lock is not held by user then
 				// requeue this endpoint for processing.
-				if !ep.segmentQueue.empty() && !ep.isOwnedByUser() {
+				if (!ep.segmentQueue.empty() || ep.tsqResumePending()) && !ep.isOwnedByUser() {
 					p.epQ.enqueue(ep)
 				}
 			}

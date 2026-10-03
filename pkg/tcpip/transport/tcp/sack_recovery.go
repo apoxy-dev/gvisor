@@ -44,7 +44,7 @@ func (sr *sackRecovery) handleSACKRecovery(limit int, end seqnum.Value) (dataSen
 
 	nextSegHint := snd.writeList.Front()
 	for snd.Outstanding < snd.SndCwnd {
-		if !snd.ccsimPacingAllows() {
+		if !snd.xmitAllows() {
 			return dataSent
 		}
 		var nextSeg *segment

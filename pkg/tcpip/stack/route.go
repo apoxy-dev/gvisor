@@ -342,6 +342,12 @@ func (r *Route) HasHostGSOCapability() bool {
 	return false
 }
 
+// HasTxNotifyCapability returns true if the link endpoint of the route tells
+// the senders about the packets in its queue.
+func (r *Route) HasTxNotifyCapability() bool {
+	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilityTxNotify != 0
+}
+
 // HasSaveRestoreCapability returns true if the route supports save/restore.
 func (r *Route) HasSaveRestoreCapability() bool {
 	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilitySaveRestore != 0

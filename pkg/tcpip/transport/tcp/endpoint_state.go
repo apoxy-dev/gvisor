@@ -141,6 +141,7 @@ func (e *Endpoint) loadState(_ context.Context, epState EndpointState) {
 func (e *Endpoint) afterLoad(ctx context.Context) {
 	// RacyLoad() can be used because we are initializing e.
 	e.origEndpointState = e.state.RacyLoad()
+	e.tsq.ep = e
 	// Restore the endpoint to InitialState as it will be moved to
 	// its origEndpointState during Restore.
 	e.state = atomicbitops.FromUint32(uint32(StateInitial))
